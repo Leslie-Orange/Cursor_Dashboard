@@ -971,8 +971,22 @@ private enum GlassTheme {
     static let slateMuted = Color(red: 92 / 255, green: 106 / 255, blue: 122 / 255)
     static let warning = Color(red: 0.96, green: 0.60, blue: 0.06)
     static let danger = Color(red: 0.94, green: 0.29, blue: 0.30)
+    static let panelWidth: CGFloat = 386
+    static let panelHeight: CGFloat = 292
     static let panelRadius: CGFloat = 30
-    static let cardRadius: CGFloat = 22
+    static let panelInset: CGFloat = 14
+    static let cardRadius: CGFloat = panelRadius - panelInset
+    static let shadowPadding: CGFloat = 18
+    static var windowWidth: CGFloat { panelWidth + shadowPadding * 2 }
+    static var windowHeight: CGFloat { panelHeight + shadowPadding * 2 }
+
+    static var panelShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
+    }
+
+    static var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+    }
 
     static func emphasis(remaining: Double?) -> Color {
         guard let remaining else { return slateMuted.opacity(0.7) }
@@ -982,128 +996,157 @@ private enum GlassTheme {
     }
 }
 
+private final class MaskedGlassView: NSVisualEffectView {
+    var cornerRadius: CGFloat = GlassTheme.panelRadius {
+        didSet { applyMask() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyMask()
+    }
+
+    override func layout() {
+        super.layout()
+        applyMask()
+    }
+
+    private func applyMask() {
+        wantsLayer = true
+        layer?.cornerRadius = cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.borderWidth = 0
+    }
+}
+
 private struct VisualBlur: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .hudWindow
+    var cornerRadius: CGFloat = GlassTheme.panelRadius
 
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
+    func makeNSView(context: Context) -> MaskedGlassView {
+        let view = MaskedGlassView()
         view.material = material
         view.blendingMode = .behindWindow
         view.state = .active
         view.isEmphasized = true
-        view.wantsLayer = true
+        view.cornerRadius = cornerRadius
         return view
     }
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+    func updateNSView(_ nsView: MaskedGlassView, context: Context) {
         nsView.material = material
         nsView.state = .active
+        nsView.cornerRadius = cornerRadius
     }
 }
 
-private struct LiquidGlassBackground: View {
-    private let shape = RoundedRectangle(cornerRadius: GlassTheme.panelRadius, style: .continuous)
+private struct GlassPanel<Content: View>: View {
+    @ViewBuilder var content: Content
 
     var body: some View {
-        ZStack {
-            VisualBlur(material: .hudWindow)
+        content
+            .background {
+                ZStack {
+                    VisualBlur(material: .hudWindow, cornerRadius: GlassTheme.panelRadius)
 
-            Circle()
-                .fill(GlassTheme.cyan.opacity(0.58))
-                .frame(width: 260, height: 260)
-                .blur(radius: 42)
-                .offset(x: -138, y: -108)
+                    Circle()
+                        .fill(GlassTheme.cyan.opacity(0.58))
+                        .frame(width: 260, height: 260)
+                        .blur(radius: 42)
+                        .offset(x: -138, y: -108)
 
-            Circle()
-                .fill(GlassTheme.peach.opacity(0.62))
-                .frame(width: 280, height: 280)
-                .blur(radius: 46)
-                .offset(x: 132, y: 18)
+                    Circle()
+                        .fill(GlassTheme.peach.opacity(0.62))
+                        .frame(width: 280, height: 280)
+                        .blur(radius: 46)
+                        .offset(x: 132, y: 18)
 
-            Circle()
-                .fill(GlassTheme.lavender.opacity(0.52))
-                .frame(width: 240, height: 240)
-                .blur(radius: 44)
-                .offset(x: 118, y: 128)
+                    Circle()
+                        .fill(GlassTheme.lavender.opacity(0.52))
+                        .frame(width: 240, height: 240)
+                        .blur(radius: 44)
+                        .offset(x: 118, y: 128)
 
-            Circle()
-                .fill(Color.white.opacity(0.28))
-                .frame(width: 180, height: 180)
-                .blur(radius: 36)
-                .offset(x: -20, y: -10)
+                    Circle()
+                        .fill(Color.white.opacity(0.28))
+                        .frame(width: 180, height: 180)
+                        .blur(radius: 36)
+                        .offset(x: -20, y: -10)
 
-            shape.fill(Color.white.opacity(0.10))
-
-            shape.fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.34),
-                        Color.white.opacity(0.08),
-                        Color.white.opacity(0.04)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-        }
-        .clipShape(shape)
-        .overlay(alignment: .top) {
-            shape
-                .stroke(Color.white.opacity(0.92), lineWidth: 1.2)
-                .blur(radius: 0.4)
-                .mask(
-                    LinearGradient(
-                        colors: [Color.white, Color.white.opacity(0.15), .clear],
-                        startPoint: .top,
-                        endPoint: .center
+                    GlassTheme.panelShape.fill(Color.white.opacity(0.10))
+                    GlassTheme.panelShape.fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.34),
+                                Color.white.opacity(0.08),
+                                Color.white.opacity(0.04)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
                     )
-                )
-                .allowsHitTesting(false)
-        }
-        .overlay(
-            shape.stroke(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.86),
-                        Color.white.opacity(0.28),
-                        Color.white.opacity(0.55)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 1
-            )
-        )
-        .shadow(color: Color.black.opacity(0.06), radius: 8, x: 0, y: 4)
-        .shadow(color: Color.black.opacity(0.10), radius: 22, x: 0, y: 12)
-        .shadow(color: Color.black.opacity(0.12), radius: 40, x: 0, y: 20)
-    }
-}
-
-private struct NestedGlassGroove: View {
-    private let shape = RoundedRectangle(cornerRadius: GlassTheme.cardRadius, style: .continuous)
-
-    var body: some View {
-        shape
-            .fill(.thinMaterial)
-            .overlay(shape.fill(Color.white.opacity(0.06)))
-            .overlay(shape.fill(Color.black.opacity(0.045)))
-            .overlay(
-                shape.stroke(Color.black.opacity(0.06), lineWidth: 1)
-                    .blur(radius: 0.8)
-                    .offset(y: 0.6)
-                    .mask(shape)
-            )
-            .overlay(
-                shape.stroke(
+                }
+                .clipShape(GlassTheme.panelShape)
+            }
+            .clipShape(GlassTheme.panelShape)
+            .containerShape(GlassTheme.panelShape)
+            .compositingGroup()
+            .overlay {
+                GlassTheme.panelShape.strokeBorder(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.22), Color.white.opacity(0.05)],
-                        startPoint: .top,
-                        endPoint: .bottom
+                        colors: [
+                            Color.white.opacity(0.72),
+                            Color.white.opacity(0.22),
+                            Color.white.opacity(0.42)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     ),
                     lineWidth: 0.8
                 )
-            )
+            }
+            .overlay {
+                GlassTheme.panelShape
+                    .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.6)
+                    .mask(
+                        LinearGradient(
+                            colors: [Color.white, Color.white.opacity(0.18), .clear],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: Color.black.opacity(0.08), radius: 6, x: 0, y: 3)
+            .shadow(color: Color.black.opacity(0.12), radius: 16, x: 0, y: 10)
+    }
+}
+
+private struct GlassInsetCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .background {
+                ZStack {
+                    GlassTheme.cardShape.fill(.thinMaterial)
+                    GlassTheme.cardShape.fill(Color.white.opacity(0.06))
+                    GlassTheme.cardShape.fill(Color.black.opacity(0.04))
+                }
+            }
+            .clipShape(GlassTheme.cardShape)
+            .overlay {
+                GlassTheme.cardShape.strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.7
+                )
+            }
     }
 }
 
@@ -1167,6 +1210,7 @@ private struct QuotaRing: View {
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
+                .scaleEffect(x: -1, y: 1)
 
             Text(label)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -1191,43 +1235,44 @@ private struct QuotaCard: View {
     }
 
     var body: some View {
-        HStack(spacing: 13) {
-            QuotaRing(label: window.badge, progress: progress, tint: tint)
+        GlassInsetCard {
+            HStack(spacing: 13) {
+                QuotaRing(label: window.badge, progress: progress, tint: tint)
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(GlassTheme.slate)
-                    .lineLimit(1)
-                Text(QuotaFormatter.reset(window.resetAt))
-                    .font(.system(size: 11, weight: .medium))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(GlassTheme.slate)
+                        .lineLimit(1)
+                    Text(QuotaFormatter.reset(window.resetAt))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(GlassTheme.slateMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(QuotaFormatter.percent(window.remaining))
+                        .font(.system(size: 23, weight: .bold, design: .rounded))
+                        .foregroundStyle(tint)
+                    Text(
+                        QuotaFormatter.burnRatePerDay(
+                            used: window.used,
+                            remaining: window.remaining,
+                            resetAt: window.resetAt,
+                            windowMinutes: window.windowMinutes
+                        )
+                    )
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(GlassTheme.slateMuted)
                     .lineLimit(1)
+                    .monospacedDigit()
+                }
             }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(QuotaFormatter.percent(window.remaining))
-                    .font(.system(size: 23, weight: .bold, design: .rounded))
-                    .foregroundStyle(tint)
-                Text(
-                    QuotaFormatter.burnRatePerDay(
-                        used: window.used,
-                        remaining: window.remaining,
-                        resetAt: window.resetAt,
-                        windowMinutes: window.windowMinutes
-                    )
-                )
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(GlassTheme.slateMuted)
-                .lineLimit(1)
-                .monospacedDigit()
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(NestedGlassGroove())
     }
 }
 
@@ -1262,9 +1307,7 @@ struct QuotaView: View {
     }
 
     var body: some View {
-        ZStack {
-            LiquidGlassBackground()
-
+        GlassPanel {
             VStack(spacing: 0) {
                 HStack(spacing: 11) {
                     ZStack {
@@ -1310,7 +1353,7 @@ struct QuotaView: View {
                     QuotaCard(window: currentSnapshot?.primary ?? placeholder)
                     QuotaCard(window: currentSnapshot?.secondary ?? placeholder)
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, GlassTheme.panelInset)
 
                 HStack(spacing: 7) {
                     Circle()
@@ -1332,9 +1375,107 @@ struct QuotaView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 16)
             }
+            .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
         }
-        .frame(width: 386, height: 292)
+        .padding(GlassTheme.shadowPadding)
         .environment(\.colorScheme, .light)
+    }
+}
+
+private final class QuotaDetailPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        isReleasedWhenClosed = false
+        level = .popUpMenu
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        animationBehavior = .utilityWindow
+        hidesOnDeactivate = false
+        appearance = NSAppearance(named: .vibrantLight)
+    }
+}
+
+@MainActor
+final class QuotaDetailPanelController {
+    private let panel: QuotaDetailPanel
+    private let hostingController: NSHostingController<QuotaView>
+
+    var isShown: Bool { panel.isVisible }
+
+    var window: NSWindow { panel }
+
+    init(model: QuotaModel, refresh: @escaping () -> Void, dismiss: @escaping () -> Void) {
+        hostingController = NSHostingController(rootView: QuotaView(
+            model: model,
+            refresh: refresh,
+            dismiss: dismiss
+        ))
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.isOpaque = false
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingController.view.layer?.masksToBounds = false
+        hostingController.view.appearance = NSAppearance(named: .vibrantLight)
+
+        panel = QuotaDetailPanel(
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: GlassTheme.windowWidth,
+                height: GlassTheme.windowHeight
+            )
+        )
+        panel.contentViewController = hostingController
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.isOpaque = false
+        panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentView?.layer?.masksToBounds = false
+        panel.setContentSize(NSSize(width: GlassTheme.windowWidth, height: GlassTheme.windowHeight))
+    }
+
+    func show(relativeTo statusView: NSView) {
+        position(relativeTo: statusView)
+        panel.orderFrontRegardless()
+    }
+
+    func close() {
+        panel.orderOut(nil)
+    }
+
+    func toggle(relativeTo statusView: NSView) {
+        if isShown {
+            close()
+        } else {
+            show(relativeTo: statusView)
+        }
+    }
+
+    private func position(relativeTo statusView: NSView) {
+        guard let statusWindow = statusView.window else { return }
+        let statusRect = statusWindow.convertToScreen(statusView.convert(statusView.bounds, to: nil))
+        let size = NSSize(width: GlassTheme.windowWidth, height: GlassTheme.windowHeight)
+        var origin = NSPoint(
+            x: statusRect.midX - size.width / 2,
+            y: statusRect.minY - size.height + GlassTheme.shadowPadding - 6
+        )
+
+        if let visible = (statusWindow.screen ?? NSScreen.main)?.visibleFrame {
+            origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - size.width - 8)
+            if origin.y < visible.minY + 8 {
+                origin.y = statusRect.maxY - GlassTheme.shadowPadding + 6
+            }
+        }
+
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
     }
 }
 
@@ -1488,7 +1629,7 @@ final class QuotaStatusView: NSView {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = QuotaModel()
-    private var popover: NSPopover!
+    private var detailPanel: QuotaDetailPanelController!
     private var statusItem: NSStatusItem!
     private var statusView: QuotaStatusView!
     private let statusMenu = NSMenu()
@@ -1498,7 +1639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        buildPopover()
+        buildDetailPanel()
         buildStatusItem()
         model.$snapshot
             .combineLatest(model.$fallbackSnapshot)
@@ -1522,24 +1663,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.stop()
     }
 
-    private func buildPopover() {
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.appearance = NSAppearance(named: .vibrantLight)
-        popover.contentSize = NSSize(width: 386, height: 292)
-
-        let hostingController = NSHostingController(rootView: QuotaView(
+    private func buildDetailPanel() {
+        detailPanel = QuotaDetailPanelController(
             model: model,
             refresh: { [weak self] in self?.model.refresh(forceNetwork: true) },
             dismiss: { [weak self] in self?.closePopover() }
-        ))
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
-        hostingController.view.layer?.cornerRadius = GlassTheme.panelRadius
-        hostingController.view.layer?.masksToBounds = false
-        hostingController.view.appearance = NSAppearance(named: .vibrantLight)
-        popover.contentViewController = hostingController
+        )
     }
 
     private func buildStatusItem() {
@@ -1592,25 +1721,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func dismissPopoverForLocalClick() {
-        guard popover.isShown else { return }
+        guard detailPanel.isShown else { return }
         let clickLocation = NSEvent.mouseLocation
-
-        if let popoverWindow = popover.contentViewController?.view.window,
-           popoverWindow.frame.contains(clickLocation) {
+        if isClickInDetailCard(clickLocation) || isClickInStatusItem(clickLocation) {
             return
         }
-
-        if isClickInStatusItem(clickLocation) {
-            return
-        }
-
         closePopover()
     }
 
     private func dismissPopoverForGlobalClick() {
-        guard popover.isShown else { return }
+        guard detailPanel.isShown else { return }
         if isClickInStatusItem(NSEvent.mouseLocation) { return }
         closePopover()
+    }
+
+    private func isClickInDetailCard(_ clickLocation: NSPoint) -> Bool {
+        let frame = detailPanel.window.frame
+        return frame.insetBy(dx: GlassTheme.shadowPadding, dy: GlassTheme.shadowPadding).contains(clickLocation)
     }
 
     private func isClickInStatusItem(_ clickLocation: NSPoint) -> Bool {
@@ -1631,48 +1758,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showPopover() {
         guard let statusView else { return }
-        if !popover.isShown {
-            popover.show(relativeTo: statusView.bounds, of: statusView, preferredEdge: .minY)
-            DispatchQueue.main.async { [weak self] in
-                self?.transparentizePopoverChrome()
-            }
+        if !detailPanel.isShown {
+            detailPanel.show(relativeTo: statusView)
         }
-    }
-
-    private func transparentizePopoverChrome() {
-        guard let window = popover.contentViewController?.view.window else { return }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.appearance = NSAppearance(named: .vibrantLight)
-
-        guard let frameView = window.contentView?.superview else { return }
-        frameView.wantsLayer = true
-        frameView.layer?.backgroundColor = NSColor.clear.cgColor
-        if let effect = frameView as? NSVisualEffectView {
-            effect.material = .hudWindow
-            effect.blendingMode = .behindWindow
-            effect.state = .active
-        }
-        for subview in frameView.subviews where subview !== window.contentView {
-            subview.wantsLayer = true
-            subview.layer?.backgroundColor = NSColor.clear.cgColor
-            subview.layer?.opacity = 0
-        }
-        window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     @objc private func closePopover() {
-        popover.performClose(nil)
+        detailPanel.close()
     }
 
     private func togglePopover() {
-        if popover.isShown {
-            closePopover()
-        } else {
-            showPopover()
-        }
+        guard let statusView else { return }
+        detailPanel.toggle(relativeTo: statusView)
     }
 
     @objc private func refreshQuota() {
