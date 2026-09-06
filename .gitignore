@@ -1,0 +1,5 @@
+macOS/.build/
+.env
+session-token
+*.token
+.DS_Store
