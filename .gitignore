@@ -1,4 +1,9 @@
 macOS/.build/
+Windows/.build/
+Windows/GenerateIcon.exe
+CursorQuotaPet.exe
+CursorQuotaPet.pdb
+dist/
 .env
 session-token
 *.token

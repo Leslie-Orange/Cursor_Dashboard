@@ -1,14 +1,14 @@
-# Cursor 额度仪表盘（macOS）
+# Cursor 额度仪表盘（Windows）
 
-这是一个独立的 macOS 菜单栏小工具，常驻状态栏，显示当前 Cursor 账号在计费周期内的剩余额度。
+这是一个独立的 Windows 系统托盘小工具，常驻通知区域，显示当前 Cursor 账号在计费周期内的剩余额度。
 
-状态栏会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`，左侧为仪表盘图标。点击后在状态栏下方展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+托盘图标会直接显示两行剩余比例，例如上面是内置模型剩余、下面是其他模型剩余。鼠标悬停可看到完整百分比。左键点击后在托盘附近展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
 本工具读取的是 **Cursor 套餐用量**（本月已用 / 剩余 / 重置时间，以及内置模型与其他模型分项），不是 ChatGPT 或 Codex 的限额窗口。
 
 ## 功能
 
-- 菜单栏常驻，无需打开 Dock 窗口
+- 系统托盘常驻，无需打开任务栏窗口
 - 显示套餐 / 计划名称
 - 显示周期内剩余百分比，以及按本周期已用额度折算的消耗速度（`x%/天`）
 - 显示内置模型（Auto / Composer）与其他模型（第三方 / 指定模型）的剩余比例
@@ -27,12 +27,10 @@
 1. 环境变量 `CURSOR_SESSION_TOKEN`  
    可以是 Cursor 会话 JWT，或浏览器 Cookie `WorkosCursorSessionToken` 的完整值（`sub::jwt`）。
 2. 本地配置文件  
-   `~/Library/Application Support/CursorQuotaPet/session-token`  
+   `%APPDATA%\CursorQuotaPet\session-token`  
    内容为一行令牌，格式同上。该目录不会被提交到 git。
-3. macOS 钥匙串  
-   `cursor-access-token`（`cursor-agent` CLI 登录后可能写入）。
-4. 本机 Cursor 已登录会话（默认、推荐）  
-   `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`  
+3. 本机 Cursor 已登录会话（默认、推荐）  
+   `%APPDATA%\Cursor\User\globalStorage\state.vscdb`  
    读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。
 
 只要 Cursor 应用已登录，一般无需再配置。会话过期时，重新在 Cursor 里登录即可。
@@ -60,8 +58,8 @@
 
 | 位置 | 内容 |
 | --- | --- |
-| 状态栏第一行 | **内置**剩余百分比（Cursor 自带模型：Auto / Composer） |
-| 状态栏第二行 | **其他**剩余百分比（指定的第三方模型） |
+| 托盘图标第一行 | **内置**剩余百分比（Cursor 自带模型：Auto / Composer） |
+| 托盘图标第二行 | **其他**剩余百分比（指定的第三方模型） |
 | 弹窗标题 | 套餐名称，如 `Pro 额度` |
 | 第一张卡片 | 内置模型剩余、重置倒计时、消耗速度（`x%/天`） |
 | 第二张卡片 | 其他模型剩余、同一周期的重置倒计时、消耗速度（`x%/天`） |
@@ -72,26 +70,37 @@
 
 Cursor 的额度按**当前计费月**计算，不是 ChatGPT Codex 那种 5 小时 / 7 天窗口。内置与其他是同一周期内的两个池子：内置对应 Auto / Composer，其他对应 Claude、GPT 等指定模型。百分比取自 Cursor 设置页同一套字段（`autoPercentUsed` / `apiPercentUsed`），与系统用量条对齐。
 
+## 安装
+
+双击 `dist\Cursor仪表盘-Setup.exe`。安装程序会写入当前用户目录（无需管理员权限），并在开始菜单创建「Cursor仪表盘」。默认勾选开机启动；桌面快捷方式可选。
+
+也可以从源码生成安装包（需要 .NET Framework 4.8 与 [Inno Setup 6](https://jrsoftware.org/isinfo.php)）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\build-installer.ps1
+```
+
 ## 启动
 
-双击 `Start-CursorQuotaPet.command`。首次运行会编译并打开 `CursorQuotaPet.app`；之后也可以直接双击项目根目录中的 `CursorQuotaPet.app`。
+安装后从开始菜单打开「Cursor仪表盘」，或双击 `Start-CursorQuotaPet.bat`。首次从源码运行会编译并打开 `CursorQuotaPet.exe`。
 
-如果系统阻止 `.command` 或 `.app`，请在「系统设置 → 隐私与安全性」中允许打开，或先在终端执行：
+如果系统阻止 `.bat` 或 `.exe`，请在资源管理器中允许打开，或先在 PowerShell 中执行：
 
-```zsh
-chmod +x "./Start-CursorQuotaPet.command" "./macOS/build-mac.sh"
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\build-win.ps1
+.\CursorQuotaPet.exe
 ```
 
 ## 编译与自检
 
-需要已安装 Xcode Command Line Tools（提供 `swiftc`）。
+需要已安装 .NET Framework 4.8（Windows 10 / 11 通常自带，提供 `csc.exe`）。
 
-```zsh
-./macOS/build-mac.sh
-./CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --probe
+```powershell
+.\Windows\build-win.ps1
+.\CursorQuotaPet.exe --probe
 ```
 
-`build-mac.sh` 会按当前 Mac 的 CPU 架构编译，并以 macOS 13.0 为最低兼容版本。自检成功时输出类似：
+`build-win.ps1` 会用本机 .NET Framework 编译 WinForms 系统托盘程序。自检成功时输出类似：
 
 ```json
 {
@@ -116,14 +125,13 @@ chmod +x "./Start-CursorQuotaPet.command" "./macOS/build-mac.sh"
 3. 复制 `WorkosCursorSessionToken` 的值。
 4. 任选一种方式提供给本工具（不要提交到 git）：
 
-```zsh
+```powershell
 # 方式 A：环境变量（当前终端有效）
-export CURSOR_SESSION_TOKEN='user_…::eyJhbGci…'
+$env:CURSOR_SESSION_TOKEN='user_…::eyJhbGci…'
 
 # 方式 B：本地配置文件
-mkdir -p "$HOME/Library/Application Support/CursorQuotaPet"
-printf '%s\n' 'user_…::eyJhbGci…' > "$HOME/Library/Application Support/CursorQuotaPet/session-token"
-chmod 600 "$HOME/Library/Application Support/CursorQuotaPet/session-token"
+New-Item -ItemType Directory -Force -Path "$env:APPDATA\CursorQuotaPet" | Out-Null
+Set-Content -Path "$env:APPDATA\CursorQuotaPet\session-token" -Value 'user_…::eyJhbGci…' -Encoding ascii
 ```
 
 Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当作本工具的凭证。
@@ -132,8 +140,8 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 
 | 操作 | 作用 |
 | --- | --- |
-| 左键点击状态栏 | 打开 / 关闭额度详情 |
-| 右键点击状态栏 | 打开菜单 |
+| 左键点击托盘图标 | 打开 / 关闭额度详情 |
+| 右键点击托盘图标 | 打开菜单 |
 | 显示额度 | 展开详情弹窗 |
 | 立即刷新 | 马上重新请求用量 |
 | 打开 Cursor 用量页 | 在浏览器打开官方仪表盘 |
@@ -141,8 +149,8 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 
 ## 常见问题
 
-**状态栏一直是「内置 —」**  
-先确认 Cursor 已登录。可运行 `--probe` 查看是「未找到登录态」还是接口报错。登录后等几秒，或右键「立即刷新」。
+**托盘图标一直是「—」**  
+先确认 Cursor 已登录。可运行 `--probe` 查看是「未找到登录态」还是接口报错。登录后等几秒，或右键「立即刷新」。Windows 可能默认隐藏托盘图标，请在任务栏溢出区或「其他图标」里找到本工具并设为显示。
 
 **提示会话过期 / 未认证**  
 在 Cursor 中重新登录，或按上面步骤更新 `CURSOR_SESSION_TOKEN` / 配置文件。Cookie 和本地 `accessToken` 都会过期。
@@ -157,4 +165,4 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 令牌只在本机读取，请求只发往 `cursor.com` 与 `api2.cursor.sh`。应用不把令牌写入项目目录或自检输出。请不要把 `session-token` 文件或环境变量提交到 git。
 
 **和官方用量页的关系**  
-这是第三方菜单栏客户端，不是 Cursor 官方应用。套餐规则、限速和账单以 Cursor 官方说明为准。
+这是第三方系统托盘客户端，不是 Cursor 官方应用。套餐规则、限速和账单以 Cursor 官方说明为准。
