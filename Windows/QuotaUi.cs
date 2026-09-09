@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -334,7 +335,7 @@ internal sealed class QuotaPopupForm : Form
             {
                 arc.StartCap = LineCap.Round;
                 arc.EndCap = LineCap.Round;
-                g.DrawArc(arc, ring, -90, 360f * progress);
+                g.DrawArc(arc, ring, -90, -360f * progress);
             }
         }
 
@@ -450,14 +451,123 @@ internal sealed class QuotaPopupForm : Form
     }
 }
 
+internal sealed class QuotaTrayTipForm : Form
+{
+    private string _line1 = "内置：—";
+    private string _line2 = "其他：—";
+
+    public QuotaTrayTipForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        BackColor = Color.FromArgb(255, 36, 48, 62);
+        ForeColor = Color.White;
+        Size = new Size(108, 54);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+    }
+
+    protected override bool ShowWithoutActivation
+    {
+        get { return true; }
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= NativeMethods.WsExToolwindow | NativeMethods.WsExNoActivate | NativeMethods.WsExTransparent;
+            cp.ClassStyle |= NativeMethods.CsDropShadow;
+            return cp;
+        }
+    }
+
+    public void ShowTip(string line1, string line2)
+    {
+        _line1 = line1;
+        _line2 = line2;
+        using (Bitmap measure = new Bitmap(1, 1))
+        using (Graphics g = Graphics.FromImage(measure))
+        using (Font font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular))
+        {
+            SizeF first = g.MeasureString(_line1, font);
+            SizeF second = g.MeasureString(_line2, font);
+            int width = (int)Math.Ceiling(Math.Max(first.Width, second.Width)) + 20;
+            int height = (int)Math.Ceiling(first.Height + second.Height) + 16;
+            Size = new Size(width, height);
+        }
+        PositionNearTray();
+        if (!Visible)
+        {
+            Show();
+        }
+        Invalidate();
+        Update();
+    }
+
+    public void HideTip()
+    {
+        if (Visible)
+        {
+            Hide();
+        }
+    }
+
+    private void PositionNearTray()
+    {
+        Point cursor = Control.MousePosition;
+        Screen screen = Screen.FromPoint(cursor);
+        Rectangle working = screen.WorkingArea;
+        int x = cursor.X - Width / 2;
+        int y = working.Bottom - Height - 8;
+        if (cursor.Y < working.Top + 80)
+        {
+            y = working.Top + 8;
+        }
+        if (x < working.Left + 8)
+        {
+            x = working.Left + 8;
+        }
+        if (x + Width > working.Right - 8)
+        {
+            x = working.Right - Width - 8;
+        }
+        Location = new Point(x, y);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.Clear(BackColor);
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        using (Font font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular))
+        using (SolidBrush brush = new SolidBrush(ForeColor))
+        {
+            float y = 8f;
+            g.DrawString(_line1, font, brush, 10f, y);
+            SizeF size = g.MeasureString(_line1, font);
+            g.DrawString(_line2, font, brush, 10f, y + size.Height);
+        }
+    }
+}
+
 internal sealed class QuotaApplicationContext : ApplicationContext
 {
     private readonly QuotaModel _model;
     private readonly NotifyIcon _notifyIcon;
     private readonly ContextMenuStrip _menu;
     private readonly QuotaPopupForm _popup;
+    private readonly QuotaTrayTipForm _trayTip;
+    private readonly Timer _trayTipTimer;
     private Icon _currentIcon;
     private DateTime _hiddenAtUtc = DateTime.MinValue;
+    private DateTime _trayHoverStartUtc = DateTime.MinValue;
+    private DateTime _trayHoverLastUtc = DateTime.MinValue;
+    private bool _trayHovering;
+    private string _tipLine1 = "内置：—";
+    private string _tipLine2 = "其他：—";
 
     public QuotaApplicationContext()
     {
@@ -469,11 +579,19 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         }
         _model.MarshalControl = _popup;
         _menu = BuildMenu();
+        _menu.Opening += delegate { HideTrayTip(); };
+
+        _trayTip = new QuotaTrayTipForm();
+        _trayTipTimer = new Timer();
+        _trayTipTimer.Interval = 80;
+        _trayTipTimer.Tick += OnTrayTipTimerTick;
 
         _notifyIcon = new NotifyIcon();
         _notifyIcon.Visible = true;
-        _notifyIcon.Text = "Cursor 额度";
+        _notifyIcon.Text = "";
         _notifyIcon.ContextMenuStrip = _menu;
+        _notifyIcon.MouseMove += OnTrayMouseMove;
+        _notifyIcon.MouseDown += OnTrayMouseDown;
         _notifyIcon.MouseUp += OnTrayMouseUp;
 
         _model.Changed += UpdateTray;
@@ -492,8 +610,92 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         return menu;
     }
 
+    private void OnTrayMouseMove(object sender, MouseEventArgs e)
+    {
+        DateTime now = DateTime.UtcNow;
+        if (!_trayHovering)
+        {
+            _trayHovering = true;
+            _trayHoverStartUtc = now;
+            _trayTipTimer.Start();
+        }
+        _trayHoverLastUtc = now;
+    }
+
+    private void OnTrayMouseDown(object sender, MouseEventArgs e)
+    {
+        HideTrayTip();
+    }
+
+    private void OnTrayTipTimerTick(object sender, EventArgs e)
+    {
+        if (!IsCursorOverTrayIcon() || _popup.Visible)
+        {
+            HideTrayTip();
+            return;
+        }
+        if ((DateTime.UtcNow - _trayHoverStartUtc).TotalMilliseconds >= 400 && !_trayTip.Visible)
+        {
+            _trayTip.ShowTip(_tipLine1, _tipLine2);
+        }
+    }
+
+    private bool IsCursorOverTrayIcon()
+    {
+        Rectangle bounds;
+        if (TryGetTrayIconRect(out bounds))
+        {
+            bounds.Inflate(8, 8);
+            return bounds.Contains(Control.MousePosition);
+        }
+        return (DateTime.UtcNow - _trayHoverLastUtc).TotalMilliseconds <= 800;
+    }
+
+    private bool TryGetTrayIconRect(out Rectangle bounds)
+    {
+        bounds = Rectangle.Empty;
+        try
+        {
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo idField = typeof(NotifyIcon).GetField("id", flags);
+            FieldInfo windowField = typeof(NotifyIcon).GetField("window", flags);
+            if (idField == null || windowField == null)
+            {
+                return false;
+            }
+            NativeWindow window = windowField.GetValue(_notifyIcon) as NativeWindow;
+            if (window == null || window.Handle == IntPtr.Zero)
+            {
+                return false;
+            }
+            NativeMethods.NotifyIconIdentifier identifier = new NativeMethods.NotifyIconIdentifier();
+            identifier.cbSize = Marshal.SizeOf(typeof(NativeMethods.NotifyIconIdentifier));
+            identifier.hWnd = window.Handle;
+            identifier.uID = (int)idField.GetValue(_notifyIcon);
+            NativeMethods.Rect rect;
+            if (NativeMethods.Shell_NotifyIconGetRect(ref identifier, out rect) != 0)
+            {
+                return false;
+            }
+            bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+            return bounds.Width > 0 && bounds.Height > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void HideTrayTip()
+    {
+        _trayHovering = false;
+        _trayTipTimer.Stop();
+        _trayTip.HideTip();
+    }
+
     private void OnTrayMouseUp(object sender, MouseEventArgs e)
     {
+        HideTrayTip();
         if (e.Button != MouseButtons.Left)
         {
             return;
@@ -514,6 +716,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
 
     private void ShowPopup()
     {
+        HideTrayTip();
         PositionPopup();
         _popup.Relayout();
         _popup.Show();
@@ -580,29 +783,24 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private void UpdateTray()
     {
         QuotaSnapshot snapshot = _model.DisplaySnapshot;
-        string primaryBadge = "内置";
-        string secondaryBadge = "其他";
         double? primaryRemain = null;
         double? secondaryRemain = null;
         if (snapshot != null && snapshot.Primary != null)
         {
-            primaryBadge = snapshot.Primary.Badge;
             primaryRemain = snapshot.Primary.Remaining;
         }
         if (snapshot != null && snapshot.Secondary != null)
         {
-            secondaryBadge = snapshot.Secondary.Badge;
             secondaryRemain = snapshot.Secondary.Remaining;
         }
 
-        string primaryText = primaryBadge + " " + QuotaFormatter.Percent(primaryRemain);
-        string secondaryText = secondaryBadge + " " + QuotaFormatter.Percent(secondaryRemain);
-        string tip = primaryText + "  " + secondaryText;
-        if (tip.Length > 63)
+        _tipLine1 = "内置：" + QuotaFormatter.Percent(primaryRemain);
+        _tipLine2 = "其他：" + QuotaFormatter.Percent(secondaryRemain);
+        _notifyIcon.Text = "";
+        if (_trayTip.Visible)
         {
-            tip = QuotaFormatter.Percent(primaryRemain) + " / " + QuotaFormatter.Percent(secondaryRemain);
+            _trayTip.ShowTip(_tipLine1, _tipLine2);
         }
-        _notifyIcon.Text = tip;
 
         Icon icon = TrayIconFactory.Create(primaryRemain, secondaryRemain);
         Icon old = _currentIcon;
@@ -639,6 +837,15 @@ internal sealed class QuotaApplicationContext : ApplicationContext
             if (_menu != null)
             {
                 _menu.Dispose();
+            }
+            if (_trayTipTimer != null)
+            {
+                _trayTipTimer.Stop();
+                _trayTipTimer.Dispose();
+            }
+            if (_trayTip != null)
+            {
+                _trayTip.Dispose();
             }
             if (_popup != null)
             {
@@ -703,11 +910,35 @@ internal static class NativeMethods
 {
     public const int WsExLayered = 0x00080000;
     public const int WsExToolwindow = 0x00000080;
+    public const int WsExNoActivate = 0x08000000;
+    public const int WsExTransparent = 0x00000020;
+    public const int CsDropShadow = 0x00020000;
     private const int UlwAlpha = 0x00000002;
     private const byte AcSrcOver = 0x00;
     private const byte AcSrcAlpha = 0x01;
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpDoNotRound = 1;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NotifyIconIdentifier
+    {
+        public int cbSize;
+        public IntPtr hWnd;
+        public int uID;
+        public Guid guidItem;
+    }
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    public static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier identifier, out Rect iconLocation);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
