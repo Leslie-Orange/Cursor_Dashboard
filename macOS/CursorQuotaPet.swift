@@ -964,11 +964,8 @@ final class QuotaModel: ObservableObject {
 private enum GlassTheme {
     static let mint = Color(red: 22 / 255, green: 148 / 255, blue: 108 / 255)
     static let mintDeep = Color(red: 14 / 255, green: 122 / 255, blue: 92 / 255)
-    static let cyan = Color(red: 125 / 255, green: 211 / 255, blue: 252 / 255)
-    static let peach = Color(red: 255 / 255, green: 183 / 255, blue: 162 / 255)
-    static let lavender = Color(red: 196 / 255, green: 181 / 255, blue: 253 / 255)
-    static let slate = Color(red: 36 / 255, green: 48 / 255, blue: 62 / 255)
-    static let slateMuted = Color(red: 92 / 255, green: 106 / 255, blue: 122 / 255)
+    static let slate = Color.primary
+    static let slateMuted = Color.secondary
     static let warning = Color(red: 0.96, green: 0.60, blue: 0.06)
     static let danger = Color(red: 0.94, green: 0.29, blue: 0.30)
     static let panelWidth: CGFloat = 386
@@ -1045,43 +1042,68 @@ private struct VisualBlur: NSViewRepresentable {
 private struct GlassPanel<Content: View>: View {
     @ViewBuilder var content: Content
 
+    @ViewBuilder
     var body: some View {
+        if #available(macOS 26.0, *) {
+            modernBody
+        } else {
+            legacyBody
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private var modernBody: some View {
+        content
+            .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
+            .glassEffect(
+                .regular.tint(Color.white.opacity(0.10)),
+                in: GlassTheme.panelShape
+            )
+            .clipShape(GlassTheme.panelShape)
+            .containerShape(GlassTheme.panelShape)
+            .overlay {
+                GlassTheme.panelShape.strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.82),
+                            Color.white.opacity(0.24),
+                            Color.white.opacity(0.48)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.8
+                )
+            }
+            .overlay {
+                GlassTheme.panelShape
+                    .strokeBorder(Color.white.opacity(0.52), lineWidth: 0.6)
+                    .mask(
+                        LinearGradient(
+                            colors: [Color.white, Color.white.opacity(0.16), .clear],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: Color.black.opacity(0.10), radius: 7, x: 0, y: 4)
+            .shadow(color: Color.black.opacity(0.15), radius: 22, x: 0, y: 12)
+    }
+
+    private var legacyBody: some View {
         content
             .background {
                 ZStack {
                     VisualBlur(material: .hudWindow, cornerRadius: GlassTheme.panelRadius)
 
-                    Circle()
-                        .fill(GlassTheme.cyan.opacity(0.58))
-                        .frame(width: 260, height: 260)
-                        .blur(radius: 42)
-                        .offset(x: -138, y: -108)
-
-                    Circle()
-                        .fill(GlassTheme.peach.opacity(0.62))
-                        .frame(width: 280, height: 280)
-                        .blur(radius: 46)
-                        .offset(x: 132, y: 18)
-
-                    Circle()
-                        .fill(GlassTheme.lavender.opacity(0.52))
-                        .frame(width: 240, height: 240)
-                        .blur(radius: 44)
-                        .offset(x: 118, y: 128)
-
-                    Circle()
-                        .fill(Color.white.opacity(0.28))
-                        .frame(width: 180, height: 180)
-                        .blur(radius: 36)
-                        .offset(x: -20, y: -10)
-
-                    GlassTheme.panelShape.fill(Color.white.opacity(0.10))
+                    GlassTheme.panelShape.fill(Color.white.opacity(0.12))
                     GlassTheme.panelShape.fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.34),
-                                Color.white.opacity(0.08),
-                                Color.white.opacity(0.04)
+                                Color.white.opacity(0.30),
+                                Color.white.opacity(0.10),
+                                Color.black.opacity(0.04)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
@@ -1127,26 +1149,46 @@ private struct GlassPanel<Content: View>: View {
 private struct GlassInsetCard<Content: View>: View {
     @ViewBuilder var content: Content
 
+    @ViewBuilder
     var body: some View {
-        content
-            .background {
-                ZStack {
-                    GlassTheme.cardShape.fill(.thinMaterial)
-                    GlassTheme.cardShape.fill(Color.white.opacity(0.06))
-                    GlassTheme.cardShape.fill(Color.black.opacity(0.04))
-                }
-            }
-            .clipShape(GlassTheme.cardShape)
-            .overlay {
-                GlassTheme.cardShape.strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.7
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(
+                    .clear.tint(Color.white.opacity(0.09)),
+                    in: GlassTheme.cardShape
                 )
-            }
+                .clipShape(GlassTheme.cardShape)
+                .overlay {
+                    GlassTheme.cardShape.strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.38), Color.white.opacity(0.10)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.7
+                    )
+                }
+        } else {
+            content
+                .background {
+                    ZStack {
+                        GlassTheme.cardShape.fill(.thinMaterial)
+                        GlassTheme.cardShape.fill(Color.white.opacity(0.06))
+                        GlassTheme.cardShape.fill(Color.black.opacity(0.04))
+                    }
+                }
+                .clipShape(GlassTheme.cardShape)
+                .overlay {
+                    GlassTheme.cardShape.strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.7
+                    )
+                }
+        }
     }
 }
 
@@ -1155,32 +1197,48 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
 
+    @ViewBuilder
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(GlassTheme.slate.opacity(0.78))
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .background {
-            Circle().fill(.ultraThinMaterial)
-            Circle().fill(Color.white.opacity(0.32))
-        }
-        .overlay(
-            Circle().stroke(
-                LinearGradient(
-                    colors: [Color.white.opacity(0.88), Color.white.opacity(0.28)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 0.8
+        if #available(macOS 26.0, *) {
+            Button(action: action) {
+                icon
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.small)
+            .accessibilityLabel(accessibilityLabel)
+            .help(accessibilityLabel)
+        } else {
+            Button(action: action) {
+                icon
+            }
+            .buttonStyle(.plain)
+            .background {
+                Circle().fill(.ultraThinMaterial)
+                Circle().fill(Color.white.opacity(0.32))
+            }
+            .overlay(
+                Circle().stroke(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.88), Color.white.opacity(0.28)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.8
+                )
             )
-        )
-        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 2)
-        .accessibilityLabel(accessibilityLabel)
-        .help(accessibilityLabel)
+            .shadow(color: Color.black.opacity(0.08), radius: 6, y: 2)
+            .accessibilityLabel(accessibilityLabel)
+            .help(accessibilityLabel)
+        }
+    }
+
+    private var icon: some View {
+        Image(systemName: systemName)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(GlassTheme.slate.opacity(0.78))
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
     }
 }
 
@@ -1378,7 +1436,6 @@ struct QuotaView: View {
             .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
         }
         .padding(GlassTheme.shadowPadding)
-        .environment(\.colorScheme, .light)
     }
 }
 
@@ -1401,7 +1458,6 @@ private final class QuotaDetailPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         animationBehavior = .utilityWindow
         hidesOnDeactivate = false
-        appearance = NSAppearance(named: .vibrantLight)
     }
 }
 
@@ -1424,7 +1480,6 @@ final class QuotaDetailPanelController {
         hostingController.view.layer?.isOpaque = false
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
         hostingController.view.layer?.masksToBounds = false
-        hostingController.view.appearance = NSAppearance(named: .vibrantLight)
 
         panel = QuotaDetailPanel(
             contentRect: NSRect(
@@ -1463,15 +1518,16 @@ final class QuotaDetailPanelController {
         guard let statusWindow = statusView.window else { return }
         let statusRect = statusWindow.convertToScreen(statusView.convert(statusView.bounds, to: nil))
         let size = NSSize(width: GlassTheme.windowWidth, height: GlassTheme.windowHeight)
+        let topAnchor = min(statusRect.minY, statusWindow.frame.minY)
         var origin = NSPoint(
             x: statusRect.midX - size.width / 2,
-            y: statusRect.minY - size.height + GlassTheme.shadowPadding - 6
+            y: topAnchor - size.height + GlassTheme.shadowPadding
         )
 
         if let visible = (statusWindow.screen ?? NSScreen.main)?.visibleFrame {
             origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - size.width - 8)
             if origin.y < visible.minY + 8 {
-                origin.y = statusRect.maxY - GlassTheme.shadowPadding + 6
+                origin.y = max(statusRect.maxY, statusWindow.frame.maxY) - GlassTheme.shadowPadding
             }
         }
 
