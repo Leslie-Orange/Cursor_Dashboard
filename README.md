@@ -72,7 +72,22 @@
 
 Cursor 的额度按**当前计费月**计算，不是 ChatGPT Codex 那种 5 小时 / 7 天窗口。内置与其他是同一周期内的两个池子：内置对应 Auto / Composer，其他对应 Claude、GPT 等指定模型。百分比取自 Cursor 设置页同一套字段（`autoPercentUsed` / `apiPercentUsed`），与系统用量条对齐。
 
-## 启动
+## 安装（推荐）
+
+双击 `dist/Cursor额度仪表盘-1.1.0.dmg`，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
+
+这是菜单栏应用：启动后请看屏幕右上角，不会在 Dock 常驻。首次打开若被系统拦截，按住 Control 单击应用并选择「打开」。
+
+重新打包安装盘：
+
+```zsh
+chmod +x "./macOS/pack-dmg.sh"
+./macOS/pack-dmg.sh
+```
+
+会生成通用二进制（Apple Silicon + Intel）安装盘：`dist/Cursor额度仪表盘-1.1.0.dmg`。
+
+## 从源码启动
 
 双击 `Start-CursorQuotaPet.command`。首次运行会编译并打开 `CursorQuotaPet.app`；之后也可以直接双击项目根目录中的 `CursorQuotaPet.app`。
 

@@ -1,4 +1,8 @@
 macOS/.build/
+macOS/AppIcon.iconset/
+dist/dmg-root/
+dist/scratch/
+dist/*-rw.dmg
 .env
 session-token
 *.token

@@ -3,19 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Cursor 额度仪表盘</string>
+	<string>Cursor额度仪表盘</string>
 	<key>CFBundleExecutable</key>
 	<string>CursorQuotaPet</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.local.cursor.quotapet</string>
 	<key>CFBundleName</key>
-	<string>CursorQuotaPet</string>
+	<string>Cursor额度仪表盘</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
