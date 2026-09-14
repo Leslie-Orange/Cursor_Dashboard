@@ -10,12 +10,16 @@ internal static class CursorQuotaPetMain
     private static void Main(string[] args)
     {
         bool probe = false;
+        bool show = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (string.Equals(args[i], "--probe", StringComparison.OrdinalIgnoreCase))
             {
                 probe = true;
-                break;
+            }
+            else if (string.Equals(args[i], "--show", StringComparison.OrdinalIgnoreCase))
+            {
+                show = true;
             }
         }
 
@@ -42,12 +46,27 @@ internal static class CursorQuotaPetMain
 
         if (!SingleInstance.TryAcquire())
         {
+            if (show && !SingleInstance.RequestShow())
+            {
+                MessageBox.Show(
+                    "Cursor 仪表盘已经在运行，请在任务栏右下角的隐藏图标中打开。",
+                    "Cursor 仪表盘",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
             return;
         }
 
-        NativeBootstrap.HideConsoleWindow();
-        Application.EnableVisualStyles();
-        Application.Run(new QuotaApplicationContext());
+        try
+        {
+            NativeBootstrap.HideConsoleWindow();
+            Application.EnableVisualStyles();
+            Application.Run(new QuotaApplicationContext(show));
+        }
+        finally
+        {
+            SingleInstance.Release();
+        }
     }
 
     private static void TryDpiAware()
@@ -99,12 +118,62 @@ internal static class ServicePointInit
 internal static class SingleInstance
 {
     private static System.Threading.Mutex _mutex;
+    private static System.Threading.EventWaitHandle _showEvent;
+    private const string MutexName = @"Local\CursorQuotaPet";
+    private const string ShowEventName = @"Local\CursorQuotaPet.Show";
 
     public static bool TryAcquire()
     {
         bool created;
-        _mutex = new System.Threading.Mutex(true, @"Local\CursorQuotaPet", out created);
+        _mutex = new System.Threading.Mutex(true, MutexName, out created);
+        if (!created)
+        {
+            _mutex.Dispose();
+            _mutex = null;
+            return false;
+        }
+
+        _showEvent = new System.Threading.EventWaitHandle(
+            false,
+            System.Threading.EventResetMode.AutoReset,
+            ShowEventName);
         return created;
+    }
+
+    public static System.Threading.WaitHandle ShowEvent
+    {
+        get { return _showEvent; }
+    }
+
+    public static bool RequestShow()
+    {
+        try
+        {
+            using (System.Threading.EventWaitHandle signal =
+                System.Threading.EventWaitHandle.OpenExisting(ShowEventName))
+            {
+                return signal.Set();
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static void Release()
+    {
+        if (_showEvent != null)
+        {
+            _showEvent.Dispose();
+            _showEvent = null;
+        }
+        if (_mutex != null)
+        {
+            _mutex.ReleaseMutex();
+            _mutex.Dispose();
+            _mutex = null;
+        }
     }
 }
 

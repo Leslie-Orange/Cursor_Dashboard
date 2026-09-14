@@ -188,8 +188,9 @@ internal sealed class QuotaPopupForm : Form
 
     private void Render(Graphics g)
     {
-        RectangleF bounds = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-        using (GraphicsPath panel = RoundedRect(bounds, GlassTheme.PanelRadius))
+        RectangleF panelBounds = new RectangleF(0f, 0f, Width, Height);
+        RectangleF panelBorderBounds = new RectangleF(0.75f, 0.75f, Width - 1.5f, Height - 1.5f);
+        using (GraphicsPath panel = RoundedRect(panelBounds, GlassTheme.PanelRadius))
         {
             using (Bitmap interior = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb))
             {
@@ -204,7 +205,7 @@ internal sealed class QuotaPopupForm : Form
                     DrawBlob(ig, new Rectangle(230, 10, 280, 280), Color.FromArgb(100, GlassTheme.Peach));
                     DrawBlob(ig, new Rectangle(210, 140, 240, 240), Color.FromArgb(90, GlassTheme.Lavender));
                     DrawBlob(ig, new Rectangle(90, 70, 180, 180), Color.FromArgb(70, Color.White));
-                    using (LinearGradientBrush sheen = new LinearGradientBrush(bounds, Color.FromArgb(90, Color.White), Color.FromArgb(18, Color.White), LinearGradientMode.Vertical))
+                    using (LinearGradientBrush sheen = new LinearGradientBrush(panelBounds, Color.FromArgb(90, Color.White), Color.FromArgb(18, Color.White), LinearGradientMode.Vertical))
                     {
                         ig.FillRectangle(sheen, 0, 0, Width, Height);
                     }
@@ -215,9 +216,10 @@ internal sealed class QuotaPopupForm : Form
                 }
             }
 
-            using (Pen border = new Pen(Color.FromArgb(200, Color.White), 1.2f))
+            using (GraphicsPath borderPath = RoundedRect(panelBorderBounds, GlassTheme.PanelRadius - 0.75f))
+            using (Pen border = new Pen(Color.FromArgb(200, Color.White), 1f))
             {
-                g.DrawPath(border, panel);
+                g.DrawPath(border, borderPath);
             }
         }
 
@@ -310,6 +312,7 @@ internal sealed class QuotaPopupForm : Form
             }
             using (Pen border = new Pen(Color.FromArgb(70, Color.White), 1f))
             {
+                border.Alignment = PenAlignment.Inset;
                 g.DrawPath(border, path);
             }
         }
@@ -335,6 +338,9 @@ internal sealed class QuotaPopupForm : Form
             {
                 arc.StartCap = LineCap.Round;
                 arc.EndCap = LineCap.Round;
+                // The colored arc is the remaining quota. Its missing segment is
+                // the consumed quota, so a negative sweep makes consumption grow
+                // clockwise from the 12 o'clock position.
                 g.DrawArc(arc, ring, -90, -360f * progress);
             }
         }
@@ -561,6 +567,8 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private readonly QuotaPopupForm _popup;
     private readonly QuotaTrayTipForm _trayTip;
     private readonly Timer _trayTipTimer;
+    private readonly bool _showOnStart;
+    private System.Threading.RegisteredWaitHandle _showRegistration;
     private Icon _currentIcon;
     private DateTime _hiddenAtUtc = DateTime.MinValue;
     private DateTime _trayHoverStartUtc = DateTime.MinValue;
@@ -569,8 +577,9 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private string _tipLine1 = "内置：—";
     private string _tipLine2 = "其他：—";
 
-    public QuotaApplicationContext()
+    public QuotaApplicationContext(bool showOnStart)
     {
+        _showOnStart = showOnStart;
         _model = new QuotaModel();
         _popup = new QuotaPopupForm(_model, RefreshQuota, ClosePopup);
         IntPtr unusedHandle = _popup.Handle;
@@ -597,6 +606,31 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         _model.Changed += UpdateTray;
         _model.Start();
         UpdateTray();
+
+        _showRegistration = System.Threading.ThreadPool.RegisterWaitForSingleObject(
+            SingleInstance.ShowEvent,
+            delegate(object state, bool timedOut)
+            {
+                if (timedOut || _popup.IsDisposed || !_popup.IsHandleCreated)
+                {
+                    return;
+                }
+                try
+                {
+                    _popup.BeginInvoke(new MethodInvoker(ShowPopup));
+                }
+                catch
+                {
+                }
+            },
+            null,
+            System.Threading.Timeout.Infinite,
+            false);
+
+        if (_showOnStart)
+        {
+            ShowPopup();
+        }
     }
 
     private ContextMenuStrip BuildMenu()
@@ -821,6 +855,11 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            if (_showRegistration != null)
+            {
+                _showRegistration.Unregister(null);
+                _showRegistration = null;
+            }
             if (_model != null)
             {
                 _model.Stop();
