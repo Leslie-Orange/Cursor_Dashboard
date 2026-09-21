@@ -1,14 +1,24 @@
-# Cursor 额度仪表盘（macOS）
+# Cursor 额度仪表盘
 
-这是一个独立的 macOS 菜单栏小工具，常驻状态栏，显示当前 Cursor 账号在计费周期内的剩余额度。
+macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在计费周期内的剩余额度。
 
-状态栏会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`，左侧为仪表盘图标。点击后在状态栏下方展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+状态栏 / 托盘会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`，左侧为仪表盘图标。点击后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
 本工具读取的是 **Cursor 套餐用量**（本月已用 / 剩余 / 重置时间，以及内置模型与其他模型分项），不是 ChatGPT 或 Codex 的限额窗口。
 
+## 仓库结构
+
+| 路径 | 内容 |
+| --- | --- |
+| `README.md` | 开发与使用说明 |
+| `Mac/Codings/` | macOS 源码与构建脚本 |
+| `Mac/Packages/` | macOS 安装盘（`.dmg`） |
+| `Windows/Codings/` | Windows 源码与构建脚本 |
+| `Windows/Packages/` | Windows 安装包（`.exe`） |
+
 ## 功能
 
-- 菜单栏常驻，无需打开 Dock 窗口
+- 菜单栏 / 托盘常驻，无需打开主窗口
 - 显示套餐 / 计划名称
 - 显示周期内剩余百分比，以及按本周期已用额度折算的消耗速度（`x%/天`）
 - 显示内置模型（Auto / Composer）与其他模型（第三方 / 指定模型）的剩余比例
@@ -27,12 +37,12 @@
 1. 环境变量 `CURSOR_SESSION_TOKEN`  
    可以是 Cursor 会话 JWT，或浏览器 Cookie `WorkosCursorSessionToken` 的完整值（`sub::jwt`）。
 2. 本地配置文件  
-   `~/Library/Application Support/CursorQuotaPet/session-token`  
+   macOS：`~/Library/Application Support/CursorQuotaPet/session-token`  
    内容为一行令牌，格式同上。该目录不会被提交到 git。
 3. macOS 钥匙串  
    `cursor-access-token`（`cursor-agent` CLI 登录后可能写入）。
 4. 本机 Cursor 已登录会话（默认、推荐）  
-   `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`  
+   macOS：`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`  
    读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。
 
 只要 Cursor 应用已登录，一般无需再配置。会话过期时，重新在 Cursor 里登录即可。
@@ -72,38 +82,38 @@
 
 Cursor 的额度按**当前计费月**计算，不是 ChatGPT Codex 那种 5 小时 / 7 天窗口。内置与其他是同一周期内的两个池子：内置对应 Auto / Composer，其他对应 Claude、GPT 等指定模型。百分比取自 Cursor 设置页同一套字段（`autoPercentUsed` / `apiPercentUsed`），与系统用量条对齐。
 
-## 安装（推荐）
+## macOS 安装（推荐）
 
-双击 `dist/Cursor额度仪表盘-1.1.0.dmg`，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
+双击 [`Mac/Packages/Cursor额度仪表盘-1.3.0.dmg`](Mac/Packages/Cursor额度仪表盘-1.3.0.dmg)，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
 
 这是菜单栏应用：启动后请看屏幕右上角，不会在 Dock 常驻。首次打开若被系统拦截，按住 Control 单击应用并选择「打开」。
 
 重新打包安装盘：
 
 ```zsh
-chmod +x "./macOS/pack-dmg.sh"
-./macOS/pack-dmg.sh
+chmod +x "./Mac/Codings/pack-dmg.sh"
+./Mac/Codings/pack-dmg.sh
 ```
 
-会生成通用二进制（Apple Silicon + Intel）安装盘：`dist/Cursor额度仪表盘-1.1.0.dmg`。
+会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.3.0.dmg`。
 
-## 从源码启动
+## macOS 从源码启动
 
-双击 `Start-CursorQuotaPet.command`。首次运行会编译并打开 `CursorQuotaPet.app`；之后也可以直接双击项目根目录中的 `CursorQuotaPet.app`。
+双击 `Mac/Codings/Start-CursorQuotaPet.command`。首次运行会编译并打开 `Mac/Codings/CursorQuotaPet.app`；之后也可以直接双击该应用。
 
 如果系统阻止 `.command` 或 `.app`，请在「系统设置 → 隐私与安全性」中允许打开，或先在终端执行：
 
 ```zsh
-chmod +x "./Start-CursorQuotaPet.command" "./macOS/build-mac.sh"
+chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.sh"
 ```
 
-## 编译与自检
+## macOS 编译与自检
 
 需要已安装 Xcode Command Line Tools（提供 `swiftc`）。
 
 ```zsh
-./macOS/build-mac.sh
-./CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --probe
+./Mac/Codings/build-mac.sh
+./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --probe
 ```
 
 `build-mac.sh` 会按当前 Mac 的 CPU 架构编译，并以 macOS 13.0 为最低兼容版本。自检成功时输出类似：
@@ -120,6 +130,24 @@ chmod +x "./Start-CursorQuotaPet.command" "./macOS/build-mac.sh"
 
 自检失败时只会说明原因（未登录、网络错误等），不会打印令牌。
 
+## Windows 安装
+
+运行 [`Windows/Packages/CursorQuotaPet-Fix-Setup.exe`](Windows/Packages/CursorQuotaPet-Fix-Setup.exe)。默认安装到 `%LOCALAPPDATA%\Programs\Cursor仪表盘`，并创建开始菜单与桌面快捷方式。
+
+这是托盘应用：启动后请看任务栏通知区域。
+
+### 从源码编译
+
+在 Windows 上需要 .NET Framework 4.x 的 `csc.exe`，以及系统自带的 IExpress。
+
+```powershell
+cd Windows\Codings
+.\build-hotfix.ps1
+.\build-package.ps1
+```
+
+安装包输出到 `Windows/Packages/CursorQuotaPet-Fix-Setup.exe`。
+
 ## 配置
 
 大多数情况：打开 Cursor 并登录，再启动本工具即可。
@@ -135,7 +163,7 @@ chmod +x "./Start-CursorQuotaPet.command" "./macOS/build-mac.sh"
 # 方式 A：环境变量（当前终端有效）
 export CURSOR_SESSION_TOKEN='user_…::eyJhbGci…'
 
-# 方式 B：本地配置文件
+# 方式 B：本地配置文件（macOS）
 mkdir -p "$HOME/Library/Application Support/CursorQuotaPet"
 printf '%s\n' 'user_…::eyJhbGci…' > "$HOME/Library/Application Support/CursorQuotaPet/session-token"
 chmod 600 "$HOME/Library/Application Support/CursorQuotaPet/session-token"
@@ -147,8 +175,8 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 
 | 操作 | 作用 |
 | --- | --- |
-| 左键点击状态栏 | 打开 / 关闭额度详情 |
-| 右键点击状态栏 | 打开菜单 |
+| 左键点击状态栏 / 托盘 | 打开 / 关闭额度详情 |
+| 右键点击状态栏 / 托盘 | 打开菜单 |
 | 显示额度 | 展开详情弹窗 |
 | 立即刷新 | 马上重新请求用量 |
 | 打开 Cursor 用量页 | 在浏览器打开官方仪表盘 |
@@ -172,4 +200,4 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 令牌只在本机读取，请求只发往 `cursor.com` 与 `api2.cursor.sh`。应用不把令牌写入项目目录或自检输出。请不要把 `session-token` 文件或环境变量提交到 git。
 
 **和官方用量页的关系**  
-这是第三方菜单栏客户端，不是 Cursor 官方应用。套餐规则、限速和账单以 Cursor 官方说明为准。
+这是第三方客户端，不是 Cursor 官方应用。套餐规则、限速和账单以 Cursor 官方说明为准。

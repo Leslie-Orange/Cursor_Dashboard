@@ -831,6 +831,18 @@ enum QuotaFormatter {
         return fallback
     }
 
+    private static let resetAtFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MM-dd  HH:mm"
+        return formatter
+    }()
+
+    static func resetAt(_ timestamp: TimeInterval?) -> String? {
+        guard let timestamp else { return nil }
+        return "将于 \(resetAtFormatter.string(from: Date(timeIntervalSince1970: timestamp))) 重置"
+    }
+
     static func reset(_ timestamp: TimeInterval?) -> String {
         guard let timestamp else { return "重置时间未知" }
         let seconds = timestamp - Date().timeIntervalSince1970
@@ -840,7 +852,7 @@ enum QuotaFormatter {
         let days = minutes / 1440
         let hours = (minutes % 1440) / 60
         let rest = minutes % 60
-        if days > 0 { return "约 \(days) 天 \(hours) 小时后重置" }
+        if days > 0 { return "约 \(days) 天 \(hours) 小时 \(rest) 分钟后重置" }
         return "约 \(hours) 小时 \(rest) 分钟后重置"
     }
 
@@ -1240,7 +1252,20 @@ struct QuotaView: View {
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 6)
+
+                    if let resetHeadline = QuotaFormatter.resetAt(
+                        currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
+                    ) {
+                        Text(resetHeadline)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .monospacedDigit()
+                    }
+
+                    Spacer(minLength: 6)
 
                     HStack(spacing: 8) {
                         GlassIconButton(systemName: "arrow.clockwise", accessibilityLabel: "刷新额度", action: refresh)

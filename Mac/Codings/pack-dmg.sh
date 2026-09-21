@@ -1,29 +1,30 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT_DIR="${0:A:h}/.."
-cd "$ROOT_DIR"
+CODING_DIR="${0:A:h}"
+MAC_DIR="${CODING_DIR:h}"
 
 APP_DISPLAY_NAME="Cursor额度仪表盘"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/macOS/Info.plist" 2>/dev/null || echo 1.0.0)"
-DIST_DIR="$ROOT_DIR/dist"
-STAGE_DIR="$DIST_DIR/dmg-root"
-SCRATCH_DIR="$DIST_DIR/scratch"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CODING_DIR/Info.plist" 2>/dev/null || echo 1.0.0)"
+PACKAGES_DIR="$MAC_DIR/Packages"
+STAGE_DIR="$PACKAGES_DIR/dmg-root"
+SCRATCH_DIR="$CODING_DIR/.build/dmg-scratch"
 DMG_NAME="${APP_DISPLAY_NAME}-${VERSION}.dmg"
-RW_DMG="$DIST_DIR/${APP_DISPLAY_NAME}-rw.dmg"
-FINAL_DMG="$DIST_DIR/$DMG_NAME"
+RW_DMG="$PACKAGES_DIR/${APP_DISPLAY_NAME}-rw.dmg"
+FINAL_DMG="$PACKAGES_DIR/$DMG_NAME"
 VOLUME_NAME="$APP_DISPLAY_NAME"
-SOURCE_APP="$ROOT_DIR/CursorQuotaPet.app"
+SOURCE_APP="$CODING_DIR/CursorQuotaPet.app"
 STAGED_APP="$STAGE_DIR/${APP_DISPLAY_NAME}.app"
+ICON_FILE="$CODING_DIR/AppIcon.icns"
 
-SOURCE_PNG="$ROOT_DIR/macOS/icon/app-icon.png"
+SOURCE_PNG="$CODING_DIR/icon/app-icon.png"
 if [[ ! -f "$SOURCE_PNG" ]]; then
   print -u2 "找不到已确认的图标：$SOURCE_PNG"
   exit 1
 fi
 
 print "将应用图标封装为 icns…"
-ICONSET="$ROOT_DIR/macOS/AppIcon.iconset"
+ICONSET="$CODING_DIR/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 resize_icon() {
@@ -41,18 +42,18 @@ resize_icon 256 icon_256x256.png
 resize_icon 512 icon_256x256@2x.png
 resize_icon 512 icon_512x512.png
 resize_icon 1024 icon_512x512@2x.png
-iconutil -c icns -o "$ROOT_DIR/macOS/AppIcon.icns" "$ICONSET"
+iconutil -c icns -o "$ICON_FILE" "$ICONSET"
 rm -rf "$ICONSET"
 
 print "编译通用应用…"
-UNIVERSAL=1 "$ROOT_DIR/macOS/build-mac.sh"
+UNIVERSAL=1 "$CODING_DIR/build-mac.sh"
 
 rm -rf "$STAGE_DIR" "$SCRATCH_DIR"
 mkdir -p "$STAGE_DIR" "$SCRATCH_DIR"
 
 ditto "$SOURCE_APP" "$STAGED_APP"
 ln -s /Applications "$STAGE_DIR/Applications"
-cp "$ROOT_DIR/macOS/AppIcon.icns" "$STAGE_DIR/.VolumeIcon.icns"
+cp "$ICON_FILE" "$STAGE_DIR/.VolumeIcon.icns"
 
 cat > "$STAGE_DIR/安装说明.txt" <<'EOF'
 安装
@@ -90,7 +91,7 @@ exit(ok ? 0 : 1)
 '
 }
 
-set_finder_icon "$STAGED_APP" "$ROOT_DIR/macOS/AppIcon.icns"
+set_finder_icon "$STAGED_APP" "$ICON_FILE"
 
 rm -f "$RW_DMG" "$FINAL_DMG"
 hdiutil create \
@@ -142,7 +143,7 @@ if command -v SetFile >/dev/null 2>&1; then
   SetFile -a C "$MOUNT_DIR" >/dev/null 2>&1 || true
   SetFile -a C "$MOUNT_DIR/.VolumeIcon.icns" >/dev/null 2>&1 || true
 fi
-set_finder_icon "$MOUNT_DIR" "$ROOT_DIR/macOS/AppIcon.icns" || true
+set_finder_icon "$MOUNT_DIR" "$ICON_FILE" || true
 
 sync
 hdiutil detach "$MOUNT_DIR" -quiet
@@ -150,11 +151,11 @@ trap - EXIT
 
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$FINAL_DMG" >/dev/null
 rm -f "$RW_DMG"
-rm -rf "$STAGE_DIR"
+rm -rf "$STAGE_DIR" "$SCRATCH_DIR"
 
 # 先清构建机隔离属性，再写入 .dmg 文件自己的自定义图标（顺序不能反）。
 xattr -c "$FINAL_DMG" >/dev/null 2>&1 || true
-set_finder_icon "$FINAL_DMG" "$ROOT_DIR/macOS/AppIcon.icns"
+set_finder_icon "$FINAL_DMG" "$ICON_FILE"
 
 print "已生成：$FINAL_DMG"
 ls -lh "$FINAL_DMG"
