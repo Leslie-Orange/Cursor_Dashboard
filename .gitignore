@@ -1,8 +1,16 @@
-macOS/.build/
-macOS/AppIcon.iconset/
-dist/dmg-root/
-dist/scratch/
-dist/*-rw.dmg
+# macOS 构建产物
+Mac/Codings/.build/
+Mac/Codings/AppIcon.iconset/
+Mac/Codings/CursorQuotaPet.app/
+
+# macOS 打包中间文件
+Mac/Packages/dmg-root/
+Mac/Packages/*-rw.dmg
+
+# Windows 打包中间文件
+Windows/Codings/package.generated.sed
+Windows/Codings/~*.DDF
+
 .env
 session-token
 *.token

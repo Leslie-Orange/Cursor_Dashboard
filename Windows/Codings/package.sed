@@ -26,7 +26,7 @@ SourceFiles=SourceFiles
 InstallPrompt=
 DisplayLicense=
 FinishMessage=
-TargetName=E:\Cursor_Dashboard\Windows\QuotaTooltipFix\CursorQuotaPet-Fix-Setup.exe
+TargetName=__OUTPUT_EXE__
 FriendlyName=Cursor仪表盘修复版
 AppLaunched=powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File install.ps1
 PostInstallCmd=<None>
@@ -38,7 +38,7 @@ FILE2=CursorQuotaPet.ico
 FILE3=install.ps1
 
 [SourceFiles]
-SourceFiles0=E:\Cursor_Dashboard\Windows\QuotaTooltipFix
+SourceFiles0=__SOURCE_DIR__
 
 [SourceFiles0]
 %FILE0%=

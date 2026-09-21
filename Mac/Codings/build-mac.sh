@@ -1,12 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT_DIR="${0:A:h}/.."
-SOURCE_FILE="$ROOT_DIR/macOS/CursorQuotaPet.swift"
-INFO_FILE="$ROOT_DIR/macOS/Info.plist"
-ICON_FILE="$ROOT_DIR/macOS/AppIcon.icns"
-APP_DIR="$ROOT_DIR/CursorQuotaPet.app"
-BUILD_DIR="$ROOT_DIR/macOS/.build"
+CODING_DIR="${0:A:h}"
+SOURCE_FILE="$CODING_DIR/CursorQuotaPet.swift"
+INFO_FILE="$CODING_DIR/Info.plist"
+ICON_FILE="$CODING_DIR/AppIcon.icns"
+APP_DIR="$CODING_DIR/CursorQuotaPet.app"
+BUILD_DIR="$CODING_DIR/.build"
 MIN_OS="13.0"
 UNIVERSAL="${UNIVERSAL:-0}"
 
