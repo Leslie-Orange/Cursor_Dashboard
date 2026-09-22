@@ -125,6 +125,7 @@ internal static class CursorQuotaPetMain
             TestParser();
             TestAnchor();
             TestLocator();
+            TestHover();
             TestSqlite();
             if (Has(args, "--preview"))
             {
@@ -232,6 +233,53 @@ internal static class CursorQuotaPetMain
         }
         Expect(resolved.X, 1504, "fallback x");
         Expect(resolved.Y, 896, "fallback y");
+    }
+
+    private static void TestHover()
+    {
+        Point over = new Point(1520, 1050);
+        Rectangle slot = new Rectangle(1504, 1032, 32, 48);
+        Rectangle tip = new Rectangle(1470, 980, 100, 44);
+        if (!TrayHover.StillOver(over, over, slot, tip, false))
+        {
+            throw new Exception("hover on slot");
+        }
+        Point away = new Point(900, 500);
+        if (TrayHover.StillOver(away, over, slot, tip, false))
+        {
+            throw new Exception("hover followed pointer");
+        }
+        if (!TrayHover.StillOver(over, over, Rectangle.Empty, tip, false))
+        {
+            throw new Exception("hover without slot");
+        }
+        if (TrayHover.StillOver(new Point(over.X + 40, over.Y), over, Rectangle.Empty, tip, false))
+        {
+            throw new Exception("left icon without slot");
+        }
+        Rectangle locked = TrayHover.Lock(over, slot, false, Rectangle.Empty);
+        Point moved = new Point(over.X + 8, over.Y);
+        if (TrayHover.Lock(moved, slot, false, Rectangle.Empty) != locked)
+        {
+            throw new Exception("tip anchor followed the pointer");
+        }
+        if (locked != slot)
+        {
+            throw new Exception("tip anchor left the tray icon");
+        }
+        Rectangle plateTip = new Rectangle(1400, 980, 120, 48);
+        if (!ShellTipGuard.ShouldHide(new Rectangle(1448, 992, 24, 32), plateTip))
+        {
+            throw new Exception("shell plate inside tip");
+        }
+        if (ShellTipGuard.ShouldHide(new Rectangle(0, 1040, 1920, 40), plateTip))
+        {
+            throw new Exception("taskbar was treated as the shell plate");
+        }
+        if (ShellTipGuard.ShouldHide(new Rectangle(10, 10, 24, 32), plateTip))
+        {
+            throw new Exception("distant window was treated as the shell plate");
+        }
     }
 
     private static void TestSqlite()

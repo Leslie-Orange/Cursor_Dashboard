@@ -216,6 +216,150 @@ internal static class IconLocator
     }
 }
 
+internal static class TrayHover
+{
+    public static bool StillOver(Point mouse, Point lastOverIcon, Rectangle traySlot, Rectangle tip, bool tipVisible)
+    {
+        if (Contains(traySlot, mouse, 12))
+        {
+            return true;
+        }
+        if (tipVisible && Contains(tip, mouse, 8))
+        {
+            return true;
+        }
+        return Math.Abs(mouse.X - lastOverIcon.X) <= 6 && Math.Abs(mouse.Y - lastOverIcon.Y) <= 6;
+    }
+
+    public static Rectangle Lock(Point mouse, Rectangle traySlot, bool hasElement, Rectangle element)
+    {
+        if (traySlot.Width > 0 && traySlot.Height > 0)
+        {
+            Rectangle hit = traySlot;
+            hit.Inflate(16, 16);
+            if (hit.Contains(mouse))
+            {
+                return traySlot;
+            }
+        }
+        if (hasElement && element.Width >= 16 && element.Height >= 16 && element.Contains(mouse))
+        {
+            return element;
+        }
+        int width = traySlot.Width >= 16 ? traySlot.Width : 32;
+        int height = traySlot.Height >= 16 ? traySlot.Height : 32;
+        return new Rectangle(mouse.X - width / 2, mouse.Y - height / 2, width, height);
+    }
+
+    private static bool Contains(Rectangle area, Point mouse, int pad)
+    {
+        if (area.Width <= 0 || area.Height <= 0)
+        {
+            return false;
+        }
+        Rectangle hit = area;
+        hit.Inflate(pad, pad);
+        return hit.Contains(mouse);
+    }
+}
+
+internal static class ShellTipGuard
+{
+    private static readonly NativeMethods.EnumWindowsProc Callback = OnEnum;
+
+    public static bool ShouldHide(Rectangle window, Rectangle tip)
+    {
+        if (tip.Width < 16 || tip.Height < 16 || window.Width < 8 || window.Height < 8)
+        {
+            return false;
+        }
+        if (window.Width > tip.Width + 36 || window.Height > tip.Height + 20)
+        {
+            return false;
+        }
+        Rectangle hit = tip;
+        hit.Inflate(12, 16);
+        return hit.Contains(window);
+    }
+
+    public static void HideOverlapping(Rectangle tip, IntPtr excludeA, IntPtr excludeB)
+    {
+        if (tip.Width < 16 || tip.Height < 16)
+        {
+            return;
+        }
+        Request request = new Request();
+        request.Tip = tip;
+        request.ExcludeA = excludeA;
+        request.ExcludeB = excludeB;
+        request.SelfPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        GCHandle pin = GCHandle.Alloc(request);
+        try
+        {
+            NativeMethods.EnumWindows(Callback, GCHandle.ToIntPtr(pin));
+        }
+        finally
+        {
+            if (pin.IsAllocated)
+            {
+                pin.Free();
+            }
+        }
+    }
+
+    private static bool OnEnum(IntPtr hwnd, IntPtr lParam)
+    {
+        Request request = (Request)GCHandle.FromIntPtr(lParam).Target;
+        if (hwnd == IntPtr.Zero || hwnd == request.ExcludeA || hwnd == request.ExcludeB || !NativeMethods.IsWindowVisible(hwnd))
+        {
+            return true;
+        }
+        uint pid;
+        NativeMethods.GetWindowThreadProcessId(hwnd, out pid);
+        if (pid == 0 || pid == request.SelfPid)
+        {
+            return true;
+        }
+        NativeMethods.RECT rect;
+        if (!NativeMethods.GetWindowRect(hwnd, out rect))
+        {
+            return true;
+        }
+        Rectangle window = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+        if (!ShouldHide(window, request.Tip) || !IsShellTipClass(hwnd))
+        {
+            return true;
+        }
+        NativeMethods.ShowWindow(hwnd, 0);
+        return true;
+    }
+
+    private static bool IsShellTipClass(IntPtr hwnd)
+    {
+        System.Text.StringBuilder name = new System.Text.StringBuilder(256);
+        if (NativeMethods.GetClassName(hwnd, name, name.Capacity) <= 0)
+        {
+            return false;
+        }
+        string text = name.ToString();
+        if (text == "tooltips_class32" || text == "XamlExplorerHostIslandWindow")
+        {
+            return true;
+        }
+        return text.IndexOf("DesktopWindowContentBridge", StringComparison.Ordinal) >= 0
+            || text.IndexOf("PopupWindowSiteBridge", StringComparison.Ordinal) >= 0
+            || text.IndexOf("Tooltip", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private sealed class Request
+    {
+        public Rectangle Tip;
+        public IntPtr ExcludeA;
+        public IntPtr ExcludeB;
+        public uint SelfPid;
+    }
+}
+
 internal static class DetailPainter
 {
     public static Bitmap Render(QuotaSnapshot snapshot, string footer, out Rectangle refresh, out Rectangle close)
@@ -693,6 +837,7 @@ internal sealed class QuotaTrayTipForm : Form
     private Color _color1 = Color.White;
     private Color _color2 = Color.White;
     private Bitmap _surface;
+    private bool _painting;
 
     public QuotaTrayTipForm()
     {
@@ -701,7 +846,42 @@ internal sealed class QuotaTrayTipForm : Form
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(120, 52);
+        BackColor = Color.FromArgb(36, 48, 62);
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        if (Handle == IntPtr.Zero)
+        {
+        }
+        NativeMethods.DisableSystemRounding(Handle);
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x0014)
+        {
+            m.Result = (IntPtr)1;
+            return;
+        }
+        base.WndProc(ref m);
+        if (m.Msg == 0x000F && !_painting && _surface != null)
+        {
+            _painting = true;
+            try
+            {
+                NativeMethods.PresentLayered(Handle, _surface, Left, Top);
+            }
+            finally
+            {
+                _painting = false;
+            }
+        }
     }
 
     protected override bool ShowWithoutActivation
@@ -721,20 +901,25 @@ internal sealed class QuotaTrayTipForm : Form
 
     public void ShowTip(string line1, string line2, Color color1, Color color2, Rectangle icon)
     {
+        bool textSame = _line1 == line1 && _line2 == line2 && _color1.ToArgb() == color1.ToArgb() && _color2.ToArgb() == color2.ToArgb();
         _line1 = line1;
         _line2 = line2;
         _color1 = color1;
         _color2 = color2;
         Size measured = Measure();
-        Size = measured;
         Screen screen = Screen.FromRectangle(icon);
-        Location = PopupAnchor.Above(icon, measured, 0, 0, measured, GlassTheme.TipGap, screen.Bounds);
-        Present();
+        Point location = PopupAnchor.Above(icon, measured, 0, 0, measured, GlassTheme.TipGap, screen.Bounds);
+        if (textSame && Visible && Size == measured && Location == location)
+        {
+            return;
+        }
+        Size = measured;
+        Location = location;
         if (!Visible)
         {
             Show();
         }
-        NativeMethods.DisableSystemRounding(Handle);
+        Present();
     }
 
     public void HideTip()
@@ -923,6 +1108,35 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
+    public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hwnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder className, int maxCount);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hwnd, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+    public static void KeepTopmost(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+        SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+    }
+
     [DllImport("user32.dll")]
     public static extern bool DestroyIcon(IntPtr handle);
 
@@ -1070,8 +1284,10 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private Icon _currentIcon;
     private DateTime _hiddenAtUtc = DateTime.MinValue;
     private DateTime _hoverStartUtc = DateTime.MinValue;
-    private DateTime _hoverMoveUtc = DateTime.MinValue;
+    private Point _lastTrayMouse;
     private bool _hovering;
+    private bool _tipAnchorLocked;
+    private Rectangle _tipAnchor = Rectangle.Empty;
     private Rectangle _anchoredIcon = Rectangle.Empty;
     private bool _hasAnchoredIcon;
 
@@ -1093,7 +1309,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         _hoverTimer.Tick += OnHoverTick;
         _notifyIcon = new NotifyIcon();
         _notifyIcon.Visible = true;
-        _notifyIcon.Text = " ";
+        _notifyIcon.Text = "";
         _notifyIcon.ContextMenuStrip = _menu;
         _notifyIcon.MouseMove += OnTrayMouseMove;
         _notifyIcon.MouseDown += delegate { HideTip(); };
@@ -1131,13 +1347,13 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private void OnTrayMouseMove(object sender, MouseEventArgs e)
     {
         DateTime now = DateTime.UtcNow;
+        _lastTrayMouse = Control.MousePosition;
         if (!_hovering)
         {
             _hovering = true;
             _hoverStartUtc = now;
             _hoverTimer.Start();
         }
-        _hoverMoveUtc = now;
     }
 
     private void OnHoverTick(object sender, EventArgs e)
@@ -1151,29 +1367,34 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         {
             return;
         }
-        ShowTip(CurrentIcon());
+        if (!_tipAnchorLocked)
+        {
+            _tipAnchor = CaptureTipAnchor();
+            _tipAnchorLocked = true;
+        }
+        if (!_trayTip.Visible)
+        {
+            ShowTip(_tipAnchor);
+        }
+        if (_trayTip.Visible)
+        {
+            ShellTipGuard.HideOverlapping(_trayTip.Bounds, _trayTip.Handle, _popup.Handle);
+            NativeMethods.KeepTopmost(_trayTip.Handle);
+        }
+    }
+
+    private Rectangle CaptureTipAnchor()
+    {
+        Point mouse = _lastTrayMouse;
+        Rectangle slot = TraySlot();
+        Rectangle element;
+        bool hasElement = IconLocator.TryVisualElement(mouse, _trayTip.Handle, _popup.Handle, out element);
+        return TrayHover.Lock(mouse, slot, hasElement, element);
     }
 
     private bool CursorStillOverIcon()
     {
-        Point mouse = Control.MousePosition;
-        Rectangle icon = CurrentIcon();
-        Rectangle hit = icon;
-        hit.Inflate(10, 10);
-        if (hit.Contains(mouse))
-        {
-            return true;
-        }
-        if (_trayTip.Visible)
-        {
-            Rectangle tip = _trayTip.Bounds;
-            tip.Inflate(6, 6);
-            if (tip.Contains(mouse))
-            {
-                return true;
-            }
-        }
-        return (DateTime.UtcNow - _hoverMoveUtc).TotalMilliseconds <= 160;
+        return TrayHover.StillOver(Control.MousePosition, _lastTrayMouse, TraySlot(), _trayTip.Bounds, _trayTip.Visible);
     }
 
     private Rectangle CurrentIcon()
@@ -1270,6 +1491,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private void HideTip()
     {
         _hovering = false;
+        _tipAnchorLocked = false;
         _hasAnchoredIcon = false;
         _hoverTimer.Stop();
         _trayTip.HideTip();
@@ -1375,9 +1597,9 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         QuotaSnapshot snapshot = _model.Display;
         double? primary = snapshot != null && snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null;
         double? secondary = snapshot != null && snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null;
-        if (_trayTip.Visible)
+        if (_trayTip.Visible && _tipAnchorLocked)
         {
-            ShowTip(CurrentIcon());
+            ShowTip(_tipAnchor);
         }
         if (_popup.Visible)
         {
