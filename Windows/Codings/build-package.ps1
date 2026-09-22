@@ -2,48 +2,50 @@ $ErrorActionPreference = "Stop"
 
 $codings = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packages = Join-Path (Split-Path -Parent $codings) "Packages"
-$iexpress = Join-Path $env:WINDIR "System32\iexpress.exe"
-$sedTemplate = Join-Path $codings "package.sed"
-$sed = Join-Path $codings "package.generated.sed"
-$output = Join-Path $packages "CursorQuotaPet-Fix-Setup.exe"
+$compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$payloadExe = Join-Path $codings "CursorQuotaPet.exe"
+$payloadIcon = Join-Path $codings "CursorQuotaPet.ico"
+$installer = Join-Path $codings "Installer.cs"
+$manifest = Join-Path $codings "app.manifest"
+$output = Join-Path $packages "CursorQuotaPet-Setup.exe"
 
-if (-not (Test-Path -LiteralPath $iexpress)) {
-    throw "找不到 Windows IExpress：$iexpress"
+if (-not (Test-Path -LiteralPath $compiler)) {
+    throw "找不到 .NET Framework C# 编译器：$compiler"
 }
-New-Item -ItemType Directory -Force -Path $packages | Out-Null
-foreach ($required in @("CursorQuotaPet.exe", "CursorQuotaPet.core.exe", "CursorQuotaPet.ico", "install.ps1")) {
-    if (-not (Test-Path -LiteralPath (Join-Path $codings $required))) {
+foreach ($required in @($payloadExe, $payloadIcon, $installer, $manifest)) {
+    if (-not (Test-Path -LiteralPath $required)) {
         throw "缺少打包文件：$required"
     }
 }
 
-$template = Get-Content -LiteralPath $sedTemplate -Raw
-$generated = $template.Replace("__OUTPUT_EXE__", $output).Replace("__SOURCE_DIR__", $codings)
-Set-Content -LiteralPath $sed -Value $generated -Encoding ASCII
-
+New-Item -ItemType Directory -Force -Path $packages | Out-Null
+$compileOutput = $output
 if (Test-Path -LiteralPath $output) {
-    Remove-Item -LiteralPath $output -Force
+    try {
+        Remove-Item -LiteralPath $output -Force
+    }
+    catch {
+        $compileOutput = Join-Path $packages "CursorQuotaPet-Setup.new.exe"
+    }
 }
 
-$iexpressProcess = Start-Process -FilePath $iexpress -ArgumentList @('/N', $sed) -PassThru -Wait
-$iexpressExitCode = $iexpressProcess.ExitCode
-$deadline = (Get-Date).AddSeconds(30)
-while (-not (Test-Path -LiteralPath $output) -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 250
-}
-if (Test-Path -LiteralPath $sed) {
-    Remove-Item -LiteralPath $sed -Force
-}
-if (-not (Test-Path -LiteralPath $output)) {
-    throw "IExpress 打包失败，未生成安装包：$output (exit $iexpressExitCode)"
-}
-if ($null -ne $iexpressExitCode -and $iexpressExitCode -ne 0) {
-    throw "IExpress 打包失败：exit $iexpressExitCode"
+& $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
+    /out:$compileOutput `
+    /win32icon:$payloadIcon `
+    /win32manifest:$manifest `
+    /resource:"${payloadExe},CursorQuotaPet.exe" `
+    /resource:"${payloadIcon},CursorQuotaPet.ico" `
+    /reference:System.dll `
+    /reference:System.Drawing.dll `
+    /reference:System.Windows.Forms.dll `
+    $installer
+
+if ($LASTEXITCODE -ne 0) {
+    throw "安装包编译失败：exit $LASTEXITCODE"
 }
 
-$ddf = Join-Path $codings "~CursorQuotaPet-Fix-Setup.DDF"
-if (Test-Path -LiteralPath $ddf) {
-    Remove-Item -LiteralPath $ddf -Force
+if ($compileOutput -ne $output) {
+    Move-Item -LiteralPath $compileOutput -Destination $output -Force
 }
 
 Write-Output "已生成：$output"

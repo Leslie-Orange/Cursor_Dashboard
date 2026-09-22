@@ -2,7 +2,7 @@
 
 macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在计费周期内的剩余额度。
 
-状态栏 / 托盘会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`，左侧为仪表盘图标。点击后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+状态栏会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`。Windows 托盘图标上是这两行数字；鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
 本工具读取的是 **Cursor 套餐用量**（本月已用 / 剩余 / 重置时间，以及内置模型与其他模型分项），不是 ChatGPT 或 Codex 的限额窗口。
 
@@ -38,11 +38,13 @@ macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在
    可以是 Cursor 会话 JWT，或浏览器 Cookie `WorkosCursorSessionToken` 的完整值（`sub::jwt`）。
 2. 本地配置文件  
    macOS：`~/Library/Application Support/CursorQuotaPet/session-token`  
+   Windows：`%APPDATA%\CursorQuotaPet\session-token`  
    内容为一行令牌，格式同上。该目录不会被提交到 git。
 3. macOS 钥匙串  
    `cursor-access-token`（`cursor-agent` CLI 登录后可能写入）。
 4. 本机 Cursor 已登录会话（默认、推荐）  
    macOS：`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`  
+   Windows：`%APPDATA%\Cursor\User\globalStorage\state.vscdb`  
    读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。
 
 只要 Cursor 应用已登录，一般无需再配置。会话过期时，重新在 Cursor 里登录即可。
@@ -132,21 +134,21 @@ chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.s
 
 ## Windows 安装
 
-运行 [`Windows/Packages/CursorQuotaPet-Fix-Setup.exe`](Windows/Packages/CursorQuotaPet-Fix-Setup.exe)。默认安装到 `%LOCALAPPDATA%\Programs\Cursor仪表盘`，并创建开始菜单与桌面快捷方式。
+运行 [`Windows/Packages/CursorQuotaPet-Setup.exe`](Windows/Packages/CursorQuotaPet-Setup.exe)。若本机已经装过，会装回原来的目录；否则默认安装到 `%LOCALAPPDATA%\Programs\Cursor仪表盘`，并创建开始菜单与桌面快捷方式。
 
-这是托盘应用：启动后请看任务栏通知区域。
+这是托盘应用：启动后请看任务栏通知区域。鼠标放在图标上时，两行余额出现在图标正上方。左键打开详情，详情同样贴在图标上方。
 
 ### 从源码编译
 
-在 Windows 上需要 .NET Framework 4.x 的 `csc.exe`，以及系统自带的 IExpress。
+在 Windows 上需要 .NET Framework 4.x 的 `csc.exe`。
 
 ```powershell
 cd Windows\Codings
-.\build-hotfix.ps1
+.\build-win.ps1
 .\build-package.ps1
 ```
 
-安装包输出到 `Windows/Packages/CursorQuotaPet-Fix-Setup.exe`。
+安装包输出到 `Windows/Packages/CursorQuotaPet-Setup.exe`。
 
 ## 配置
 
@@ -163,10 +165,15 @@ cd Windows\Codings
 # 方式 A：环境变量（当前终端有效）
 export CURSOR_SESSION_TOKEN='user_…::eyJhbGci…'
 
-# 方式 B：本地配置文件（macOS）
+# 方式 B：本地配置文件
+# macOS
 mkdir -p "$HOME/Library/Application Support/CursorQuotaPet"
 printf '%s\n' 'user_…::eyJhbGci…' > "$HOME/Library/Application Support/CursorQuotaPet/session-token"
 chmod 600 "$HOME/Library/Application Support/CursorQuotaPet/session-token"
+
+# Windows PowerShell
+New-Item -ItemType Directory -Force -Path "$env:APPDATA\CursorQuotaPet" | Out-Null
+Set-Content -Path "$env:APPDATA\CursorQuotaPet\session-token" -Value 'user_…::eyJhbGci…' -Encoding ascii
 ```
 
 Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当作本工具的凭证。
