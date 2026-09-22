@@ -51,9 +51,8 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 
 $sourceExe = Join-Path $payloadRoot "CursorQuotaPet.exe"
-$sourceCore = Join-Path $payloadRoot "CursorQuotaPet.core.exe"
 $sourceIcon = Join-Path $payloadRoot "CursorQuotaPet.ico"
-foreach ($required in @($sourceExe, $sourceCore, $sourceIcon)) {
+foreach ($required in @($sourceExe, $sourceIcon)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Package is missing: $required"
     }
@@ -61,8 +60,6 @@ foreach ($required in @($sourceExe, $sourceCore, $sourceIcon)) {
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 $targetExe = Join-Path $InstallRoot "CursorQuotaPet.exe"
-$targetCore = Join-Path $InstallRoot "CursorQuotaPet.core.exe"
-$targetBackup = Join-Path $InstallRoot "CursorQuotaPet.original.exe"
 
 if (-not $SkipProcessStop) {
     $fullTargetExe = [IO.Path]::GetFullPath($targetExe)
@@ -73,18 +70,19 @@ if (-not $SkipProcessStop) {
             }
         }
         catch {
-            # A stale or inaccessible process path should not block a fresh install.
         }
     }
     Start-Sleep -Milliseconds 300
 }
 
-if ((Test-Path -LiteralPath $targetExe) -and -not (Test-Path -LiteralPath $targetBackup)) {
-    Copy-Item -LiteralPath $targetExe -Destination $targetBackup
-}
 Copy-Item -LiteralPath $sourceExe -Destination $targetExe -Force
-Copy-Item -LiteralPath $sourceCore -Destination $targetCore -Force
 Copy-Item -LiteralPath $sourceIcon -Destination (Join-Path $InstallRoot "CursorQuotaPet.ico") -Force
+foreach ($stale in @("CursorQuotaPet.core.exe", "CursorQuotaPet.original.exe")) {
+    $stalePath = Join-Path $InstallRoot $stale
+    if (Test-Path -LiteralPath $stalePath) {
+        Remove-Item -LiteralPath $stalePath -Force -ErrorAction SilentlyContinue
+    }
+}
 
 if (-not $NoShortcuts) {
     $shell = New-Object -ComObject WScript.Shell
@@ -104,8 +102,14 @@ if (-not $NoShortcuts) {
 
 if (-not $NoMessage) {
     Add-Type -AssemblyName System.Windows.Forms
+    $message = $appTitle + [string]::Concat(
+        [char]0x5DF2, [char]0x5B89, [char]0x88C5, "。",
+        [char]0x8BF7, [char]0x5728, [char]0x4EFB, [char]0x52A1, [char]0x680F, [char]0x901A, [char]0x77E5, [char]0x533A, [char]0x57DF, [char]0x67E5, [char]0x770B, "。",
+        [char]0x9F20, [char]0x6807, [char]0x79FB, [char]0x5230, [char]0x56FE, [char]0x6807, [char]0x4E0A, [char]0xFF0C,
+        [char]0x4F59, [char]0x989D, [char]0x4F1A, [char]0x663E, [char]0x793A, [char]0x5728, [char]0x56FE, [char]0x6807, [char]0x6B63, [char]0x4E0A, [char]0x65B9, "。"
+    )
     [Windows.Forms.MessageBox]::Show(
-        ($appTitle + " hotfix installed.`n`nUsage will now be centered above the tray icon."),
+        $message,
         $appTitle,
         [Windows.Forms.MessageBoxButtons]::OK,
         [Windows.Forms.MessageBoxIcon]::Information) | Out-Null
