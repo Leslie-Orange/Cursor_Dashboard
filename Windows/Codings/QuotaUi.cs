@@ -1278,6 +1278,11 @@ internal sealed class QuotaApplicationContext : ApplicationContext
     private void OnTrayMouseUp(object sender, MouseEventArgs e)
     {
         HideTip();
+        if (e.Button == MouseButtons.Right)
+        {
+            QueueTrayMenuFallback();
+            return;
+        }
         if (e.Button != MouseButtons.Left)
         {
             return;
@@ -1293,6 +1298,30 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         else
         {
             ShowPopup(true);
+        }
+    }
+
+    private void QueueTrayMenuFallback()
+    {
+        if (_menu.IsDisposed)
+        {
+            return;
+        }
+
+        Point screenPoint = Control.MousePosition;
+        try
+        {
+            _popup.BeginInvoke((Action)delegate
+            {
+                if (_menu.IsDisposed || _menu.Visible)
+                {
+                    return;
+                }
+                _menu.Show(screenPoint);
+            });
+        }
+        catch
+        {
         }
     }
 
