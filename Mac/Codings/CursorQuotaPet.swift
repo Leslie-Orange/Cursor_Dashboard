@@ -965,18 +965,15 @@ final class QuotaModel: ObservableObject {
         let ageMinutes = max(0, Date().timeIntervalSince(value.sampledAt) / 60)
         let formatter = DateFormatter()
         formatter.dateFormat = ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm"
-        let source = value.sourceName == "cursor-api" ? "实时" : "快照"
         let stale = ageMinutes >= 10 ? " · 可能过期" : ""
         let shortError = QuotaFormatter.shortError(connectionError)
         let error = value.sourceName == "cursor-api" || shortError.isEmpty ? "" : " · \(shortError)"
-        footer = "\(source) \(formatter.string(from: value.sampledAt))\(stale)\(error)"
+        footer = "更新于 \(formatter.string(from: value.sampledAt))\(stale)\(error)"
     }
 }
 
 private enum GlassTheme {
     static let mint = Color(red: 22 / 255, green: 148 / 255, blue: 108 / 255)
-    static let mintDeep = Color(red: 14 / 255, green: 122 / 255, blue: 92 / 255)
-    static let slate = Color.primary
     static let slateMuted = Color.secondary
     static let warning = Color(red: 0.96, green: 0.60, blue: 0.06)
     static let danger = Color(red: 0.94, green: 0.29, blue: 0.30)
@@ -1089,13 +1086,37 @@ private struct GlassPanel<Content: View>: View {
 private struct GlassInsetCard<Content: View>: View {
     @ViewBuilder var content: Content
 
+    @ViewBuilder
     var body: some View {
-        content
-            .background(GlassTheme.cardShape.fill(.primary.opacity(0.06)))
-            .clipShape(GlassTheme.cardShape)
-            .overlay {
-                GlassTheme.cardShape.strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+        if #available(macOS 26.0, *) {
+            content
+                .background(
+                    .fill.quaternary,
+                    in: ConcentricRectangle(corners: .concentric(minimum: 12), isUniform: true)
+                )
+        } else {
+            content
+                .background(GlassTheme.cardShape.fill(.primary.opacity(0.06)))
+                .clipShape(GlassTheme.cardShape)
+                .overlay {
+                    GlassTheme.cardShape.strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+                }
+        }
+    }
+}
+
+private struct GlassControlGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    @ViewBuilder
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 6) { content }
             }
+        } else {
+            HStack(spacing: 8) { content }
+        }
     }
 }
 
@@ -1104,18 +1125,56 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
 
+    private let size: CGFloat = 28
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
+                .frame(width: size, height: size)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .background(.primary.opacity(0.08), in: Circle())
+        .modifier(GlassCircleBackground())
         .accessibilityLabel(accessibilityLabel)
         .help(accessibilityLabel)
+    }
+}
+
+private struct GlassCircleBackground: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            content.background(.primary.opacity(0.08), in: Circle())
+        }
+    }
+}
+
+private struct GlassStatusChip: View {
+    let title: String
+    let tint: Color
+
+    @ViewBuilder
+    var body: some View {
+        let label = HStack(spacing: 5) {
+            Circle()
+                .fill(tint)
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+
+        if #available(macOS 26.0, *) {
+            label.glassEffect(.regular.tint(tint.opacity(0.22)), in: Capsule())
+        } else {
+            label.background(tint.opacity(0.14), in: Capsule())
+        }
     }
 }
 
@@ -1124,28 +1183,22 @@ private struct QuotaRing: View {
     let progress: CGFloat
     let tint: Color
 
-    private let size: CGFloat = 54
-    private let lineWidth: CGFloat = 6.5
+    private let size: CGFloat = 50
+    private let lineWidth: CGFloat = 5.5
 
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.primary.opacity(0.12), lineWidth: lineWidth)
+                .stroke(.quaternary, lineWidth: lineWidth)
 
             Circle()
                 .trim(from: 0, to: progress)
-                .stroke(
-                    AngularGradient(
-                        colors: [tint, GlassTheme.mintDeep, tint],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                )
+                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .scaleEffect(x: -1, y: 1)
 
             Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
@@ -1171,23 +1224,25 @@ private struct QuotaCard: View {
             HStack(spacing: 13) {
                 QuotaRing(label: window.badge, progress: progress, tint: tint)
 
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(GlassTheme.slate)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text(QuotaFormatter.reset(window.resetAt))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(GlassTheme.slateMuted)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: 6)
 
-                VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .trailing, spacing: 2) {
                     Text(QuotaFormatter.percent(window.remaining))
-                        .font(.system(size: 23, weight: .bold, design: .rounded))
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
                         .foregroundStyle(tint)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
                     Text(
                         QuotaFormatter.burnRatePerDay(
                             used: window.used,
@@ -1197,13 +1252,13 @@ private struct QuotaCard: View {
                         )
                     )
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(GlassTheme.slateMuted)
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .monospacedDigit()
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, 13)
         }
     }
 }
@@ -1234,71 +1289,63 @@ struct QuotaView: View {
     }
 
     private var statusBadge: String {
-        guard let currentSnapshot else { return "WAIT" }
-        return currentSnapshot.sourceName == "cursor-api" ? "LIVE" : "SNAPSHOT"
+        guard let currentSnapshot else { return "等待" }
+        return currentSnapshot.sourceName == "cursor-api" ? "实时" : "快照"
     }
 
     var body: some View {
         GlassPanel {
             VStack(spacing: 0) {
-                HStack(spacing: 11) {
-                    Image(systemName: "gauge.medium")
-                        .font(.system(size: 17, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-
-                    Text(QuotaFormatter.planTitle(currentSnapshot?.planType))
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
-
-                    Spacer(minLength: 6)
-
-                    if let resetHeadline = QuotaFormatter.resetAt(
-                        currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
-                    ) {
-                        Text(resetHeadline)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(QuotaFormatter.planTitle(currentSnapshot?.planType))
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .monospacedDigit()
+
+                        Text(
+                            QuotaFormatter.resetAt(
+                                currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
+                            ) ?? "重置时间未知"
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .monospacedDigit()
                     }
 
                     Spacer(minLength: 6)
 
-                    HStack(spacing: 8) {
+                    GlassControlGroup {
                         GlassIconButton(systemName: "arrow.clockwise", accessibilityLabel: "刷新额度", action: refresh)
                         GlassIconButton(systemName: "xmark", accessibilityLabel: "关闭详情", action: dismiss)
                     }
                 }
-                .padding(.horizontal, 18)
+                .padding(.leading, 20)
+                .padding(.trailing, 16)
                 .padding(.top, 16)
                 .padding(.bottom, 12)
 
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     QuotaCard(window: currentSnapshot?.primary ?? placeholder)
                     QuotaCard(window: currentSnapshot?.secondary ?? placeholder)
                 }
                 .padding(.horizontal, GlassTheme.panelInset)
 
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(statusTint)
-                        .frame(width: 7, height: 7)
+                Spacer(minLength: 0)
+
+                HStack(spacing: 8) {
                     Text(model.footer)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .monospacedDigit()
                     Spacer(minLength: 5)
-                    Text(statusBadge)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .tracking(0.9)
-                        .foregroundStyle(statusTint)
+                    GlassStatusChip(title: statusBadge, tint: statusTint)
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 12)
-                .padding(.bottom, 16)
+                .padding(.leading, 20)
+                .padding(.trailing, 16)
+                .padding(.bottom, 14)
             }
             .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
         }
