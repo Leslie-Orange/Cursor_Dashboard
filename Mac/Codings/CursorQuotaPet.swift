@@ -978,7 +978,7 @@ private enum GlassTheme {
     static let warning = Color(red: 0.96, green: 0.60, blue: 0.06)
     static let danger = Color(red: 0.94, green: 0.29, blue: 0.30)
     static let panelWidth: CGFloat = 386
-    static let panelHeight: CGFloat = 292
+    static let panelHeight: CGFloat = 280
     static let panelRadius: CGFloat = 30
     static let panelInset: CGFloat = 14
     static let cardRadius: CGFloat = panelRadius - panelInset
@@ -1153,28 +1153,20 @@ private struct GlassCircleBackground: ViewModifier {
     }
 }
 
-private struct GlassStatusChip: View {
+private struct QuotaStatusLabel: View {
     let title: String
     let tint: Color
 
-    @ViewBuilder
     var body: some View {
-        let label = HStack(spacing: 5) {
+        HStack(spacing: 5) {
             Circle()
                 .fill(tint)
                 .frame(width: 6, height: 6)
             Text(title)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-
-        if #available(macOS 26.0, *) {
-            label.glassEffect(.regular.tint(tint.opacity(0.22)), in: Capsule())
-        } else {
-            label.background(tint.opacity(0.14), in: Capsule())
-        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1220,46 +1212,44 @@ private struct QuotaCard: View {
     }
 
     var body: some View {
-        GlassInsetCard {
-            HStack(spacing: 13) {
-                QuotaRing(label: window.badge, progress: progress, tint: tint)
+        HStack(spacing: 13) {
+            QuotaRing(label: window.badge, progress: progress, tint: tint)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(QuotaFormatter.reset(window.resetAt))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 6)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(QuotaFormatter.percent(window.remaining))
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
-                        .foregroundStyle(tint)
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                    Text(
-                        QuotaFormatter.burnRatePerDay(
-                            used: window.used,
-                            remaining: window.remaining,
-                            resetAt: window.resetAt,
-                            windowMinutes: window.windowMinutes
-                        )
-                    )
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
-                    .monospacedDigit()
-                }
+                Text(QuotaFormatter.reset(window.resetAt))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 13)
+
+            Spacer(minLength: 6)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(QuotaFormatter.percent(window.remaining))
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .foregroundStyle(tint)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Text(
+                    QuotaFormatter.burnRatePerDay(
+                        used: window.used,
+                        remaining: window.remaining,
+                        resetAt: window.resetAt,
+                        windowMinutes: window.windowMinutes
+                    )
+                )
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .monospacedDigit()
+            }
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
 
@@ -1326,9 +1316,14 @@ struct QuotaView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 12)
 
-                VStack(spacing: 8) {
-                    QuotaCard(window: currentSnapshot?.primary ?? placeholder)
-                    QuotaCard(window: currentSnapshot?.secondary ?? placeholder)
+                GlassInsetCard {
+                    VStack(spacing: 0) {
+                        QuotaCard(window: currentSnapshot?.primary ?? placeholder)
+                        Divider()
+                            .padding(.leading, 77)
+                            .padding(.trailing, 14)
+                        QuotaCard(window: currentSnapshot?.secondary ?? placeholder)
+                    }
                 }
                 .padding(.horizontal, GlassTheme.panelInset)
 
@@ -1341,7 +1336,7 @@ struct QuotaView: View {
                         .lineLimit(1)
                         .monospacedDigit()
                     Spacer(minLength: 5)
-                    GlassStatusChip(title: statusBadge, tint: statusTint)
+                    QuotaStatusLabel(title: statusBadge, tint: statusTint)
                 }
                 .padding(.leading, 20)
                 .padding(.trailing, 16)
