@@ -124,13 +124,27 @@ internal static class CursorQuotaPetMain
         {
             TestParser();
             TestAnchor();
+            TestDetailLayout();
+            TestTrayTipLayout();
+            TestDpiCursorSet();
             TestLocator();
             TestHover();
             TestSqlite();
             if (Has(args, "--preview"))
             {
                 string path = Path.Combine(Path.GetTempPath(), "cursor-quota-preview.png");
-                SavePreview(path);
+                Screen screen = Screen.FromPoint(Cursor.Position);
+                if (screen == null)
+                {
+                    screen = Screen.PrimaryScreen;
+                }
+                int dpi = NativeMethods.GetMonitorDpi(screen.Bounds, IntPtr.Zero);
+                DetailLayout layout = DetailLayout.Create(screen.WorkingArea, dpi);
+                Console.WriteLine("screen.bounds=" + FormatRectangle(screen.Bounds));
+                Console.WriteLine("screen.workingArea=" + FormatRectangle(screen.WorkingArea));
+                Console.WriteLine("screen.dpi=" + dpi.ToString(CultureInfo.InvariantCulture));
+                Console.WriteLine("screen.windowSize=" + layout.WindowSize.Width.ToString(CultureInfo.InvariantCulture) + "x" + layout.WindowSize.Height.ToString(CultureInfo.InvariantCulture));
+                SavePreview(path, layout);
                 Console.WriteLine("preview=" + path);
             }
             Console.WriteLine("self-test=ok");
@@ -207,6 +221,320 @@ internal static class CursorQuotaPetMain
 
         Point flipped = PopupAnchor.Above(new Rectangle(100, 4, 32, 32), new Size(80, 40), 0, 0, new Size(80, 40), 8, screen);
         Expect(flipped.Y, 44, "flip y");
+    }
+
+    private static void TestDetailLayout()
+    {
+        int[] dpis = new int[] { 96, 120, 144, 192, 288 };
+        Rectangle roomyArea = new Rectangle(-2400, -200, 2560, 1440);
+        QuotaSnapshot snapshot = CreatePreviewSnapshot();
+        Size previousSize = Size.Empty;
+        for (int i = 0; i < dpis.Length; i++)
+        {
+            int dpi = dpis[i];
+            DetailLayout layout = DetailLayout.Create(roomyArea, dpi);
+            double expectedScale = dpi / 96.0;
+            if (Math.Abs(layout.Scale - expectedScale) > 0.001)
+            {
+                throw new Exception("detail scale at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            if (layout.WindowSize.Width <= 0 || layout.WindowSize.Height <= 0)
+            {
+                throw new Exception("detail window size at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            ExpectFloor(layout.WindowSize.Width, GlassTheme.PanelWidth + GlassTheme.Shadow * 2, layout.Scale, "detail width floor");
+            ExpectFloor(layout.WindowSize.Height, GlassTheme.PanelHeight + GlassTheme.Shadow * 2, layout.Scale, "detail height floor");
+            Rectangle sample = new Rectangle(13, 17, 211, 173);
+            Rectangle pixels = layout.ToPixels(sample);
+            ExpectFloor(pixels.Left, sample.Left, layout.Scale, "detail left floor");
+            ExpectFloor(pixels.Top, sample.Top, layout.Scale, "detail top floor");
+            ExpectFloor(pixels.Right, sample.Right, layout.Scale, "detail right floor");
+            ExpectFloor(pixels.Bottom, sample.Bottom, layout.Scale, "detail bottom floor");
+
+            DetailLayout repeated = DetailLayout.Create(roomyArea, dpi);
+            if (repeated.Scale != layout.Scale || repeated.WindowSize != layout.WindowSize
+                || repeated.PanelBounds != layout.PanelBounds || repeated.ToPixels(sample) != pixels)
+            {
+                throw new Exception("detail layout accumulated scale at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            if (previousSize != Size.Empty
+                && (layout.WindowSize.Width < previousSize.Width || layout.WindowSize.Height < previousSize.Height))
+            {
+                throw new Exception("detail size did not adapt with dpi");
+            }
+            previousSize = layout.WindowSize;
+
+            if (dpi == 192 && layout.WindowSize != new Size(844, 656))
+            {
+                throw new Exception("192 dpi detail size expected 844x656 actual "
+                    + layout.WindowSize.Width.ToString(CultureInfo.InvariantCulture) + "x"
+                    + layout.WindowSize.Height.ToString(CultureInfo.InvariantCulture));
+            }
+            TestDetailRender(snapshot, layout, dpi);
+        }
+
+        Rectangle compactArea = new Rectangle(-1280, -120, 480, 320);
+        DetailLayout compact = DetailLayout.Create(compactArea, 192);
+        if (compact.WindowSize.Width > compactArea.Width - 8 || compact.WindowSize.Height > compactArea.Height - 8)
+        {
+            throw new Exception("detail window exceeds compact working area");
+        }
+        if (compact.Scale >= 2.0f)
+        {
+            throw new Exception("detail scale was not capped for compact working area");
+        }
+
+        Rectangle secondaryArea = new Rectangle(-1920, -100, 1920, 1040);
+        DetailLayout secondary = DetailLayout.Create(secondaryArea, 144);
+        AssertDetailAnchor(secondaryArea, secondary, new Rectangle(-1000, -96, 32, 32), "top anchor");
+        AssertDetailAnchor(secondaryArea, secondary, new Rectangle(-1916, 350, 32, 32), "left anchor");
+        AssertDetailAnchor(secondaryArea, secondary, new Rectangle(-32, 350, 32, 32), "right anchor");
+        AssertDetailAnchor(secondaryArea, secondary, new Rectangle(-1000, 908, 32, 32), "bottom anchor");
+    }
+
+    private static void TestDetailRender(QuotaSnapshot snapshot, DetailLayout layout, int dpi)
+    {
+        Rectangle refresh;
+        Rectangle close;
+        using (Bitmap bitmap = DetailPainter.Render(snapshot, "自检", layout, false, false, out refresh, out close))
+        {
+            if (bitmap.Size != layout.WindowSize)
+            {
+                throw new Exception("detail bitmap size at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            Rectangle expectedRefresh = layout.ToPixels(new Rectangle(
+                GlassTheme.Shadow + GlassTheme.PanelWidth - 76,
+                GlassTheme.Shadow + 18,
+                28,
+                28));
+            Rectangle expectedClose = layout.ToPixels(new Rectangle(
+                GlassTheme.Shadow + GlassTheme.PanelWidth - 42,
+                GlassTheme.Shadow + 18,
+                28,
+                28));
+            ExpectRectangle(refresh, expectedRefresh, "refresh hit area");
+            ExpectRectangle(close, expectedClose, "close hit area");
+            Rectangle bitmapBounds = new Rectangle(Point.Empty, bitmap.Size);
+            if (!bitmapBounds.Contains(refresh) || !bitmapBounds.Contains(close) || refresh.IntersectsWith(close))
+            {
+                throw new Exception("detail button hit areas outside bitmap at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+        }
+    }
+
+    private static void TestTrayTipLayout()
+    {
+        int[] dpis = new int[] { 96, 120, 144, 192, 288 };
+        Rectangle roomyArea = new Rectangle(-2400, -200, 3840, 2160);
+        string line1 = "内置剩余 74%";
+        string line2 = "其他额度 100%";
+        TrayTipLayout layout96 = TrayTipLayout.Create(line1, line2, 96, roomyArea);
+        if (layout96.WindowSize.Width <= 0 || layout96.WindowSize.Height <= 0)
+        {
+            throw new Exception("tray tip has no physical area at 96 dpi");
+        }
+
+        for (int i = 0; i < dpis.Length; i++)
+        {
+            int dpi = dpis[i];
+            TrayTipLayout layout = TrayTipLayout.Create(line1, line2, dpi, roomyArea);
+            double expectedScale = dpi / 96.0;
+            if (Math.Abs(layout.Scale - expectedScale) > 0.001)
+            {
+                throw new Exception("tray tip scale at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            AssertTipFits(layout, roomyArea, "tray tip at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            TestTrayTipRender(line1, line2, layout, dpi);
+
+            TrayTipLayout repeated = TrayTipLayout.Create(line1, line2, dpi, roomyArea);
+            if (repeated.Scale != layout.Scale || repeated.LogicalSize != layout.LogicalSize || repeated.WindowSize != layout.WindowSize)
+            {
+                throw new Exception("tray tip layout accumulated scale at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+        }
+
+        TrayTipLayout layout192 = TrayTipLayout.Create(line1, line2, 192, roomyArea);
+        ExpectApproximatelyDouble(layout96.WindowSize, layout192.WindowSize, "tray tip 200 percent size");
+
+        TrayTipLayout empty = TrayTipLayout.Create(null, "", 144, roomyArea);
+        if (empty.WindowSize.Width <= 0 || empty.WindowSize.Height <= 0)
+        {
+            throw new Exception("empty tray tip has no physical area");
+        }
+        TestTrayTipRender(null, "", empty, 144);
+
+        StringBuilder longTextBuilder = new StringBuilder();
+        for (int i = 0; i < 96; i++)
+        {
+            longTextBuilder.Append("额度边界测试 ");
+        }
+        string longText = longTextBuilder.ToString();
+        Rectangle compactArea = new Rectangle(-420, -100, 420, 180);
+        TrayTipLayout compact = TrayTipLayout.Create(longText, longText, 288, compactArea);
+        AssertTipFits(compact, compactArea, "long tray tip on compact display");
+        if (compact.Scale >= 3.0f)
+        {
+            throw new Exception("long tray tip was not reduced for compact display");
+        }
+        TestTrayTipRender(longText, longText, compact, 288);
+
+        Rectangle secondaryArea = new Rectangle(-1600, -120, 1600, 900);
+        TrayTipLayout secondary = TrayTipLayout.Create(line1, line2, 192, secondaryArea);
+        AssertTrayTipAnchor(secondaryArea, secondary, new Rectangle(-900, -116, 32, 32), "tray tip top anchor");
+        AssertTrayTipAnchor(secondaryArea, secondary, new Rectangle(-1596, 200, 32, 32), "tray tip left anchor");
+        AssertTrayTipAnchor(secondaryArea, secondary, new Rectangle(-32, 200, 32, 32), "tray tip right anchor");
+        AssertTrayTipAnchor(secondaryArea, secondary, new Rectangle(-900, 748, 32, 32), "tray tip bottom anchor");
+    }
+
+    private static void TestTrayTipRender(string line1, string line2, TrayTipLayout layout, int dpi)
+    {
+        using (Bitmap bitmap = TrayTipPainter.Render(line1, line2, Color.White, Color.LightSkyBlue, layout))
+        {
+            if (bitmap.Size != layout.WindowSize)
+            {
+                throw new Exception("tray tip bitmap size at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+            if (bitmap.Width <= 0 || bitmap.Height <= 0)
+            {
+                throw new Exception("tray tip bitmap has no physical pixels at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
+            }
+        }
+    }
+
+    private static void AssertTipFits(TrayTipLayout layout, Rectangle workingArea, string name)
+    {
+        if (layout.WindowSize.Width <= 0 || layout.WindowSize.Height <= 0
+            || layout.WindowSize.Width > workingArea.Width - 8
+            || layout.WindowSize.Height > workingArea.Height - 8)
+        {
+            throw new Exception(name + " exceeds working area: " + FormatRectangle(new Rectangle(Point.Empty, layout.WindowSize)));
+        }
+    }
+
+    private static void AssertTrayTipAnchor(Rectangle workingArea, TrayTipLayout layout, Rectangle icon, string name)
+    {
+        Point location = PopupAnchor.Above(icon, layout.WindowSize, 0, 0, layout.WindowSize, GlassTheme.TipGap, workingArea);
+        Rectangle window = new Rectangle(location, layout.WindowSize);
+        if (!workingArea.Contains(window))
+        {
+            throw new Exception(name + " escaped working area: " + FormatRectangle(window));
+        }
+        if (location.X >= 0)
+        {
+            throw new Exception(name + " lost negative secondary-screen coordinates");
+        }
+    }
+
+    private static void ExpectApproximatelyDouble(Size singleScale, Size doubleScale, string name)
+    {
+        if (Math.Abs(doubleScale.Width - singleScale.Width * 2) > 2
+            || Math.Abs(doubleScale.Height - singleScale.Height * 2) > 2)
+        {
+            throw new Exception(name + " expected about "
+                + (singleScale.Width * 2).ToString(CultureInfo.InvariantCulture) + "x"
+                + (singleScale.Height * 2).ToString(CultureInfo.InvariantCulture) + " actual "
+                + doubleScale.Width.ToString(CultureInfo.InvariantCulture) + "x"
+                + doubleScale.Height.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static void TestDpiCursorSet()
+    {
+        DpiCursorSet cursors = new DpiCursorSet();
+        try
+        {
+            cursors.Update(96);
+            if (cursors.Arrow == null || cursors.Hand == null)
+            {
+                throw new Exception("96 dpi cursor set is incomplete");
+            }
+            IntPtr arrow96Handle = cursors.Arrow.Handle;
+            IntPtr hand96Handle = cursors.Hand.Handle;
+            Size arrow96 = NativeMethods.GetCursorImageSize(arrow96Handle);
+            Size hand96 = NativeMethods.GetCursorImageSize(hand96Handle);
+            ExpectCursorSize(arrow96, NativeMethods.GetCursorSize(96), "96 dpi arrow cursor");
+            ExpectCursorSize(hand96, NativeMethods.GetCursorSize(96), "96 dpi hand cursor");
+
+            cursors.Update(96);
+            if (cursors.Arrow.Handle != arrow96Handle || cursors.Hand.Handle != hand96Handle)
+            {
+                throw new Exception("same-dpi cursor update did not reuse resources");
+            }
+
+            cursors.Update(192);
+            IntPtr arrow192Handle = cursors.Arrow.Handle;
+            IntPtr hand192Handle = cursors.Hand.Handle;
+            Size arrow192 = NativeMethods.GetCursorImageSize(arrow192Handle);
+            Size hand192 = NativeMethods.GetCursorImageSize(hand192Handle);
+            Size expected192 = NativeMethods.GetCursorSize(192);
+            ExpectCursorSize(arrow192, expected192, "192 dpi arrow cursor");
+            ExpectCursorSize(hand192, expected192, "192 dpi hand cursor");
+            if (arrow192.Width < arrow96.Width || arrow192.Height < arrow96.Height
+                || hand192.Width < hand96.Width || hand192.Height < hand96.Height)
+            {
+                throw new Exception("200 percent cursor image is smaller than 100 percent");
+            }
+            if (arrow192 != hand192)
+            {
+                throw new Exception("200 percent arrow and hand cursor sizes differ");
+            }
+
+            cursors.Update(192);
+            if (cursors.Arrow.Handle != arrow192Handle || cursors.Hand.Handle != hand192Handle)
+            {
+                throw new Exception("same-dpi high-resolution cursor update did not reuse resources");
+            }
+        }
+        finally
+        {
+            cursors.Dispose();
+        }
+    }
+
+    private static void ExpectCursorSize(Size actual, Size expected, string name)
+    {
+        if (actual.Width <= 0 || actual.Height <= 0 || actual != expected)
+        {
+            throw new Exception(name + " expected " + expected.Width.ToString(CultureInfo.InvariantCulture) + "x"
+                + expected.Height.ToString(CultureInfo.InvariantCulture) + " actual "
+                + actual.Width.ToString(CultureInfo.InvariantCulture) + "x"
+                + actual.Height.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static void AssertDetailAnchor(Rectangle workingArea, DetailLayout layout, Rectangle icon, string name)
+    {
+        Point location = PopupAnchor.Above(
+            icon,
+            layout.WindowSize,
+            layout.Shadow,
+            layout.Shadow,
+            layout.PanelBounds.Size,
+            layout.Gap,
+            workingArea);
+        Rectangle window = new Rectangle(location, layout.WindowSize);
+        if (!workingArea.Contains(window))
+        {
+            throw new Exception(name + " escaped working area: " + FormatRectangle(window));
+        }
+    }
+
+    private static void ExpectFloor(int actual, int logical, float scale, string name)
+    {
+        double boundary = logical * (double)scale;
+        if (actual > boundary || boundary - actual >= 1.00001)
+        {
+            throw new Exception(name + " boundary " + boundary.ToString("0.###", CultureInfo.InvariantCulture)
+                + " actual " + actual.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static void ExpectRectangle(Rectangle actual, Rectangle expected, string name)
+    {
+        if (actual != expected)
+        {
+            throw new Exception(name + " expected " + FormatRectangle(expected) + " actual " + FormatRectangle(actual));
+        }
     }
 
     private static void TestLocator()
@@ -309,7 +637,7 @@ internal static class CursorQuotaPetMain
         Console.WriteLine("sqlite=ok plan=" + (plan ?? "") + " token=" + (string.IsNullOrEmpty(token) ? "no" : "yes"));
     }
 
-    private static void SavePreview(string path)
+    private static QuotaSnapshot CreatePreviewSnapshot()
     {
         QuotaWindow primary = new QuotaWindow();
         primary.Badge = "内置";
@@ -331,12 +659,23 @@ internal static class CursorQuotaPetMain
         snapshot.Secondary = secondary;
         snapshot.SampledAt = DateTime.Now;
         snapshot.SourceName = "cursor-api";
+        return snapshot;
+    }
+
+    private static void SavePreview(string path, DetailLayout layout)
+    {
         Rectangle refresh;
         Rectangle close;
-        using (Bitmap bitmap = DetailPainter.Render(snapshot, "实时 10:40", out refresh, out close))
+        using (Bitmap bitmap = DetailPainter.Render(CreatePreviewSnapshot(), "实时预览", layout, false, false, out refresh, out close))
         {
             bitmap.Save(path, ImageFormat.Png);
         }
+    }
+
+    private static string FormatRectangle(Rectangle rect)
+    {
+        return rect.X.ToString(CultureInfo.InvariantCulture) + "," + rect.Y.ToString(CultureInfo.InvariantCulture)
+            + " " + rect.Width.ToString(CultureInfo.InvariantCulture) + "x" + rect.Height.ToString(CultureInfo.InvariantCulture);
     }
 
     private static void Expect(int actual, int expected, string name)

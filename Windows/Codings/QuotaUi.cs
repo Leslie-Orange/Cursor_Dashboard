@@ -62,13 +62,46 @@ internal static class PopupAnchor
         if (y < screen.Top + 4)
         {
             y = icon.Bottom + gap - insetY;
-            int maxY = screen.Bottom - window.Height - 4;
-            if (y > maxY)
-            {
-                y = screen.Top + 4;
-            }
         }
+        y = Math.Max(screen.Top + 4, Math.Min(y, screen.Bottom - window.Height - 4));
         return new Point(x, y);
+    }
+}
+
+internal sealed class DetailLayout
+{
+    public readonly float Scale;
+    public readonly Size WindowSize;
+    public readonly Rectangle PanelBounds;
+    public readonly int Shadow;
+    public readonly int Gap;
+
+    private DetailLayout(float scale)
+    {
+        Scale = scale;
+        WindowSize = new Size(Math.Max(1, Pixels(GlassTheme.PanelWidth + GlassTheme.Shadow * 2)), Math.Max(1, Pixels(GlassTheme.PanelHeight + GlassTheme.Shadow * 2)));
+        PanelBounds = ToPixels(new Rectangle(GlassTheme.Shadow, GlassTheme.Shadow, GlassTheme.PanelWidth, GlassTheme.PanelHeight));
+        Shadow = Pixels(GlassTheme.Shadow);
+        Gap = Math.Max(1, Pixels(GlassTheme.TipGap));
+    }
+
+    public static DetailLayout Create(Rectangle workingArea, int dpi)
+    {
+        // Use absolute 96-DPI design coordinates on every update to avoid cumulative scaling.
+        double scale = (dpi > 0 ? dpi : 96) / 96.0;
+        scale = Math.Min(scale, Math.Max(1, workingArea.Width - 8) / (double)(GlassTheme.PanelWidth + GlassTheme.Shadow * 2));
+        scale = Math.Min(scale, Math.Max(1, workingArea.Height - 8) / (double)(GlassTheme.PanelHeight + GlassTheme.Shadow * 2));
+        return new DetailLayout((float)scale);
+    }
+
+    private int Pixels(int logical)
+    {
+        return (int)Math.Floor(logical * (double)Scale);
+    }
+
+    public Rectangle ToPixels(Rectangle logical)
+    {
+        return Rectangle.FromLTRB(Pixels(logical.Left), Pixels(logical.Top), Pixels(logical.Right), Pixels(logical.Bottom));
     }
 }
 
@@ -364,8 +397,13 @@ internal static class DetailPainter
 {
     public static Bitmap Render(QuotaSnapshot snapshot, string footer, out Rectangle refresh, out Rectangle close)
     {
-        int width = GlassTheme.PanelWidth + GlassTheme.Shadow * 2;
-        int height = GlassTheme.PanelHeight + GlassTheme.Shadow * 2;
+        return Render(snapshot, footer, DetailLayout.Create(new Rectangle(0, 0, 1920, 1080), 96), false, false, out refresh, out close);
+    }
+
+    public static Bitmap Render(QuotaSnapshot snapshot, string footer, DetailLayout layout, bool refreshHot, bool closeHot, out Rectangle refresh, out Rectangle close)
+    {
+        int width = Math.Max(1, layout.WindowSize.Width);
+        int height = Math.Max(1, layout.WindowSize.Height);
         Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
         using (Graphics g = Graphics.FromImage(bitmap))
         {
@@ -373,15 +411,20 @@ internal static class DetailPainter
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
+            g.ScaleTransform(layout.Scale, layout.Scale);
             Rectangle panel = new Rectangle(GlassTheme.Shadow, GlassTheme.Shadow, GlassTheme.PanelWidth, GlassTheme.PanelHeight);
             DrawPanel(g, panel);
             DrawHeader(g, panel, snapshot, out refresh, out close);
+            if (refreshHot) DrawIconButton(g, refresh, true, true);
+            if (closeHot) DrawIconButton(g, close, true, false);
             QuotaWindow primary = snapshot != null ? snapshot.Primary : Placeholder("内置");
             QuotaWindow secondary = snapshot != null ? snapshot.Secondary : Placeholder("其他");
             DrawCard(g, new Rectangle(panel.X + 14, panel.Y + 70, panel.Width - 28, 82), primary);
             DrawCard(g, new Rectangle(panel.X + 14, panel.Y + 160, panel.Width - 28, 82), secondary);
             DrawFooter(g, panel, snapshot, footer);
         }
+        refresh = layout.ToPixels(refresh);
+        close = layout.ToPixels(close);
         return bitmap;
     }
 
@@ -396,20 +439,22 @@ internal static class DetailPainter
     private static void DrawPanel(Graphics g, Rectangle panel)
     {
         using (GraphicsPath path = Rounded(panel, GlassTheme.PanelRadius))
-        using (Bitmap interior = new Bitmap(panel.Width, panel.Height, PixelFormat.Format32bppPArgb))
         {
-            using (Graphics ig = Graphics.FromImage(interior))
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(248, 236, 244, 248)))
             {
-                ig.SmoothingMode = SmoothingMode.AntiAlias;
-                ig.Clear(Color.FromArgb(248, 236, 244, 248));
-                DrawBlob(ig, new Rectangle(-70, -80, 240, 240), Color.FromArgb(90, GlassTheme.Cyan));
-                DrawBlob(ig, new Rectangle(panel.Width - 150, 0, 250, 250), Color.FromArgb(80, GlassTheme.Peach));
-                DrawBlob(ig, new Rectangle(panel.Width - 180, 120, 220, 220), Color.FromArgb(70, GlassTheme.Lavender));
+                g.FillPath(fill, path);
             }
-            using (TextureBrush brush = new TextureBrush(interior, WrapMode.Clamp))
+            GraphicsState state = g.Save();
+            try
             {
-                brush.TranslateTransform(panel.X, panel.Y);
-                g.FillPath(brush, path);
+                g.SetClip(path, CombineMode.Intersect);
+                DrawBlob(g, new Rectangle(panel.X - 70, panel.Y - 80, 240, 240), Color.FromArgb(90, GlassTheme.Cyan));
+                DrawBlob(g, new Rectangle(panel.Right - 150, panel.Y, 250, 250), Color.FromArgb(80, GlassTheme.Peach));
+                DrawBlob(g, new Rectangle(panel.Right - 180, panel.Y + 120, 220, 220), Color.FromArgb(70, GlassTheme.Lavender));
+            }
+            finally
+            {
+                g.Restore(state);
             }
             using (Pen border = new Pen(Color.FromArgb(220, Color.White), 1.2f))
             {
@@ -614,10 +659,73 @@ internal static class DetailPainter
     }
 }
 
+internal sealed class DpiCursorSet : IDisposable
+{
+    private IntPtr _arrowHandle;
+    private IntPtr _handHandle;
+    private int _dpi;
+    private Size _size;
+    private bool _disposed;
+    public Cursor Arrow { get; private set; }
+    public Cursor Hand { get; private set; }
+
+    public DpiCursorSet()
+    {
+        Arrow = Cursors.Default;
+        Hand = Cursors.Hand;
+        Update(96);
+    }
+
+    public void Update(int dpi)
+    {
+        Update(dpi, false);
+    }
+
+    public void Update(int dpi, bool force)
+    {
+        if (_disposed) throw new ObjectDisposedException("DpiCursorSet");
+        dpi = dpi > 0 ? dpi : 96;
+        Size size = NativeMethods.GetCursorSize(dpi);
+        if (!force && _dpi == dpi && _size == size) return;
+        IntPtr arrow = NativeMethods.LoadDpiCursor(32512, size);
+        IntPtr hand = NativeMethods.LoadDpiCursor(32649, size);
+        Cursor nextArrow = arrow != IntPtr.Zero ? new Cursor(arrow) : Cursors.Default;
+        Cursor nextHand = hand != IntPtr.Zero ? new Cursor(hand) : Cursors.Hand;
+        Release(Arrow, _arrowHandle, 32512);
+        Release(Hand, _handHandle, 32649);
+        _arrowHandle = arrow;
+        _handHandle = hand;
+        Arrow = nextArrow;
+        Hand = nextHand;
+        _dpi = dpi;
+        _size = size;
+    }
+
+    private static void Release(Cursor cursor, IntPtr handle, int identifier)
+    {
+        if (handle == IntPtr.Zero) return;
+        NativeMethods.ReleaseDpiCursor(handle, identifier);
+        cursor.Dispose(); // Cursor(IntPtr) does not own the native handle.
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        Release(Arrow, _arrowHandle, 32512);
+        Release(Hand, _handHandle, 32649);
+        _arrowHandle = IntPtr.Zero;
+        _handHandle = IntPtr.Zero;
+        Arrow = Cursors.Default;
+        Hand = Cursors.Hand;
+        _disposed = true;
+    }
+}
+
 internal sealed class QuotaPopupForm : Form
 {
     private readonly Action _refresh;
     private readonly Action _dismiss;
+    private readonly Func<Rectangle> _locateTrayIcon;
     private QuotaSnapshot _snapshot;
     private string _footer = "正在读取 Cursor 登录态…";
     private Rectangle _refreshRect;
@@ -626,17 +734,32 @@ internal sealed class QuotaPopupForm : Form
     private bool _closeHot;
     private Bitmap _surface;
     private DateTime _shownAtUtc = DateTime.MinValue;
+    private DetailLayout _layout = DetailLayout.Create(new Rectangle(0, 0, 1920, 1080), 96);
+    private Rectangle _anchorIcon;
+    private bool _updatingLayout;
+    private bool _layoutQueued;
+    private int _pendingDpi;
+    private int _cursorDpi = 96;
+    private readonly DpiCursorSet _cursors = new DpiCursorSet();
 
     public QuotaPopupForm(Action refresh, Action dismiss)
+        : this(refresh, dismiss, null)
+    {
+    }
+
+    public QuotaPopupForm(Action refresh, Action dismiss, Func<Rectangle> locateTrayIcon)
     {
         _refresh = refresh;
         _dismiss = dismiss;
+        _locateTrayIcon = locateTrayIcon;
+        // Layered windows are painted and hit-tested in physical pixels below.
+        AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
         TopMost = true;
         KeyPreview = true;
-        Size = new Size(GlassTheme.PanelWidth + GlassTheme.Shadow * 2, GlassTheme.PanelHeight + GlassTheme.Shadow * 2);
+        Size = _layout.WindowSize;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
         KeyDown += delegate(object sender, KeyEventArgs e)
         {
@@ -659,6 +782,7 @@ internal sealed class QuotaPopupForm : Form
         {
             _refreshHot = false;
             _closeHot = false;
+            Cursor = _cursors.Arrow;
             Present();
         };
     }
@@ -667,9 +791,9 @@ internal sealed class QuotaPopupForm : Form
     {
         _snapshot = snapshot;
         _footer = footer;
-        Screen screen = Screen.FromRectangle(icon);
-        Location = PopupAnchor.Above(icon, Size, GlassTheme.Shadow, GlassTheme.Shadow, new Size(GlassTheme.PanelWidth, GlassTheme.PanelHeight), GlassTheme.TipGap, screen.WorkingArea);
+        _anchorIcon = icon;
         _shownAtUtc = DateTime.UtcNow;
+        ApplyDisplayLayout(0);
         Present();
         if (!Visible)
         {
@@ -677,6 +801,62 @@ internal sealed class QuotaPopupForm : Form
         }
         Activate();
         NativeMethods.DisableSystemRounding(Handle);
+    }
+
+    private void ApplyDisplayLayout(int dpi)
+    {
+        if (_updatingLayout || _anchorIcon.Width <= 0)
+        {
+            return;
+        }
+        _updatingLayout = true;
+        try
+        {
+            Rectangle workingArea = NativeMethods.GetMonitorWorkingArea(_anchorIcon);
+            if (dpi <= 0)
+            {
+                dpi = NativeMethods.GetMonitorDpi(_anchorIcon, IsHandleCreated ? Handle : IntPtr.Zero);
+            }
+            _layout = DetailLayout.Create(workingArea, dpi);
+            Point location = PopupAnchor.Above(_anchorIcon, _layout.WindowSize, _layout.Shadow, _layout.Shadow, _layout.PanelBounds.Size, _layout.Gap, workingArea);
+            _refreshHot = false;
+            _closeHot = false;
+            _cursorDpi = dpi;
+            _cursors.Update(dpi);
+            Cursor = _cursors.Arrow;
+            Bounds = new Rectangle(location, _layout.WindowSize);
+        }
+        finally
+        {
+            _updatingLayout = false;
+        }
+        if (_pendingDpi > 0)
+        {
+            int pendingDpi = _pendingDpi;
+            _pendingDpi = 0;
+            if (pendingDpi != dpi) ApplyDisplayLayout(pendingDpi);
+        }
+    }
+
+    private void QueueDisplayLayout()
+    {
+        if (!Visible || _layoutQueued || IsDisposed)
+        {
+            return;
+        }
+        _layoutQueued = true;
+        BeginInvoke((Action)delegate
+        {
+            _layoutQueued = false;
+            if (!Visible || IsDisposed) return;
+            if (_locateTrayIcon != null)
+            {
+                Rectangle icon = _locateTrayIcon();
+                if (icon.Width > 0 && icon.Height > 0) _anchorIcon = icon;
+            }
+            ApplyDisplayLayout(0);
+            Present();
+        });
     }
 
     public void UpdateSnapshot(QuotaSnapshot snapshot, string footer)
@@ -716,9 +896,32 @@ internal sealed class QuotaPopupForm : Form
 
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == 0x0020 && (m.LParam.ToInt64() & 0xFFFF) == 1) // WM_SETCURSOR, HTCLIENT
+        {
+            Point client = PointToClient(Control.MousePosition);
+            Cursor pointer = _refreshRect.Contains(client) || _closeRect.Contains(client) ? _cursors.Hand : _cursors.Arrow;
+            NativeMethods.UseCursor(pointer.Handle);
+            m.Result = (IntPtr)1;
+            return;
+        }
+        if (m.Msg == 0x02E0) // WM_DPICHANGED
+        {
+            int dpi = (int)(m.WParam.ToInt64() & 0xFFFF);
+            if (_updatingLayout)
+            {
+                _pendingDpi = dpi;
+            }
+            else if (Visible)
+            {
+                ApplyDisplayLayout(dpi);
+                Present();
+            }
+            m.Result = IntPtr.Zero;
+            return;
+        }
         if (m.Msg == 0x84)
         {
-            int packed = m.LParam.ToInt32();
+            long packed = m.LParam.ToInt64();
             int x = (short)(packed & 0xFFFF);
             int y = (short)((packed >> 16) & 0xFFFF);
             Point client = PointToClient(new Point(x, y));
@@ -729,16 +932,25 @@ internal sealed class QuotaPopupForm : Form
             }
         }
         base.WndProc(ref m);
+        if (m.Msg == 0x007E || m.Msg == 0x001A) // WM_DISPLAYCHANGE / WM_SETTINGCHANGE
+        {
+            if (m.Msg == 0x001A)
+            {
+                _cursors.Update(_cursorDpi, true);
+                Cursor = _refreshHot || _closeHot ? _cursors.Hand : _cursors.Arrow;
+            }
+            QueueDisplayLayout();
+        }
     }
 
     private bool InsidePanel(Point client)
     {
-        Rectangle panel = new Rectangle(GlassTheme.Shadow, GlassTheme.Shadow, GlassTheme.PanelWidth, GlassTheme.PanelHeight);
+        Rectangle panel = _layout.PanelBounds;
         if (!panel.Contains(client))
         {
             return false;
         }
-        float radius = GlassTheme.PanelRadius;
+        float radius = GlassTheme.PanelRadius * _layout.Scale;
         float left = panel.Left + radius;
         float right = panel.Right - radius;
         float top = panel.Top + radius;
@@ -768,7 +980,7 @@ internal sealed class QuotaPopupForm : Form
             _closeHot = closeHot;
             Present();
         }
-        Cursor = (refreshHot || closeHot) ? Cursors.Hand : Cursors.Default;
+        Cursor = (refreshHot || closeHot) ? _cursors.Hand : _cursors.Arrow;
     }
 
     private void OnMouseClick(object sender, MouseEventArgs e)
@@ -798,29 +1010,17 @@ internal sealed class QuotaPopupForm : Form
         {
             _surface.Dispose();
         }
-        bool refreshHot = _refreshHot;
-        bool closeHot = _closeHot;
-        _surface = DetailPainter.Render(_snapshot, _footer, out _refreshRect, out _closeRect);
-        if (refreshHot || closeHot)
-        {
-            using (Graphics g = Graphics.FromImage(_surface))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                if (refreshHot)
-                {
-                    DetailPainter.DrawIconButton(g, _refreshRect, true, true);
-                }
-                if (closeHot)
-                {
-                    DetailPainter.DrawIconButton(g, _closeRect, true, false);
-                }
-            }
-        }
+        _surface = DetailPainter.Render(_snapshot, _footer, _layout, _refreshHot, _closeHot, out _refreshRect, out _closeRect);
         NativeMethods.PresentLayered(Handle, _surface, Left, Top);
     }
 
     protected override void Dispose(bool disposing)
     {
+        if (disposing)
+        {
+            Cursor = Cursors.Default;
+            _cursors.Dispose();
+        }
         if (disposing && _surface != null)
         {
             _surface.Dispose();
@@ -830,22 +1030,159 @@ internal sealed class QuotaPopupForm : Form
     }
 }
 
+internal sealed class TrayTipLayout
+{
+    public readonly float Scale;
+    public readonly Size WindowSize;
+    public readonly Size LogicalSize;
+    public readonly int Gap;
+
+    private TrayTipLayout(float scale, Size logicalSize)
+    {
+        Scale = scale;
+        LogicalSize = logicalSize;
+        WindowSize = new Size(ScalePixels(logicalSize.Width, scale), ScalePixels(logicalSize.Height, scale));
+        Gap = Math.Max(1, ScalePixels(GlassTheme.TipGap, scale));
+    }
+
+    public static TrayTipLayout Create(string line1, string line2, int dpi, Rectangle workingArea)
+    {
+        line1 = line1 ?? string.Empty;
+        line2 = line2 ?? string.Empty;
+        Size logicalSize = MeasureLogical(line1, line2);
+        double scale = (dpi > 0 ? dpi : 96) / 96.0;
+        int availableWidth = Math.Max(1, workingArea.Width - 8);
+        int availableHeight = Math.Max(1, workingArea.Height - 8);
+        scale = Math.Min(scale, availableWidth / (double)logicalSize.Width);
+        scale = Math.Min(scale, availableHeight / (double)logicalSize.Height);
+        return new TrayTipLayout((float)scale, logicalSize);
+    }
+
+    internal static Size MeasureLogical(string line1, string line2)
+    {
+        line1 = line1 ?? string.Empty;
+        line2 = line2 ?? string.Empty;
+        using (Font font = TrayTipPainter.CreateFont())
+        using (Bitmap bitmap = new Bitmap(1, 1))
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            SizeF first = g.MeasureString(line1, font);
+            SizeF second = g.MeasureString(line2, font);
+            int width = SafeCeiling(Math.Max(first.Width, second.Width)) + 22;
+            int height = SafeCeiling(first.Height + second.Height) + 14;
+            return new Size(Math.Max(88, width), Math.Max(44, height));
+        }
+    }
+
+    private static int SafeCeiling(float value)
+    {
+        if (float.IsNaN(value) || value <= 0)
+        {
+            return 0;
+        }
+        if (float.IsInfinity(value) || value >= int.MaxValue - 64)
+        {
+            return int.MaxValue - 64;
+        }
+        return (int)Math.Ceiling(value);
+    }
+
+    private static int ScalePixels(int value, float scale)
+    {
+        double scaled = Math.Floor(value * (double)scale);
+        if (scaled < 1)
+        {
+            return 1;
+        }
+        return scaled >= int.MaxValue ? int.MaxValue : (int)scaled;
+    }
+}
+
+internal static class TrayTipPainter
+{
+    private const float FontSize = 13f;
+    private const float LeftInset = 11f;
+    private const float TopInset = 7f;
+    private const float CornerRadius = 16f;
+
+    public static Bitmap Render(string line1, string line2, Color color1, Color color2, TrayTipLayout layout)
+    {
+        line1 = line1 ?? string.Empty;
+        line2 = line2 ?? string.Empty;
+        int width = Math.Max(1, layout.WindowSize.Width);
+        int height = Math.Max(1, layout.WindowSize.Height);
+        Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        using (GraphicsPath path = new GraphicsPath())
+        using (Font font = CreateFont())
+        using (Bitmap measureBitmap = new Bitmap(1, 1))
+        using (Graphics measure = Graphics.FromImage(measureBitmap))
+        {
+            SizeF firstSize = measure.MeasureString(line1, font);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.Clear(Color.Transparent);
+            g.ScaleTransform(layout.Scale, layout.Scale);
+
+            Rectangle box = new Rectangle(0, 0, Math.Max(1, layout.LogicalSize.Width - 1), Math.Max(1, layout.LogicalSize.Height - 1));
+            float d = Math.Min(CornerRadius, Math.Min(box.Width, box.Height) / 2f);
+            path.AddArc(box.X, box.Y, d, d, 180, 90);
+            path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
+            path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
+            path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(235, 36, 48, 62)))
+            {
+                g.FillPath(fill, path);
+            }
+            using (SolidBrush first = new SolidBrush(color1))
+            using (SolidBrush second = new SolidBrush(color2))
+            {
+                g.DrawString(line1, font, first, LeftInset, TopInset);
+                g.DrawString(line2, font, second, LeftInset, TopInset + firstSize.Height - 2f);
+            }
+        }
+        return bitmap;
+    }
+
+    internal static Font CreateFont()
+    {
+        return new Font("Microsoft YaHei UI", FontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+    }
+}
+
 internal sealed class QuotaTrayTipForm : Form
 {
     private string _line1 = "内置 —";
     private string _line2 = "其他 —";
     private Color _color1 = Color.White;
     private Color _color2 = Color.White;
+    private readonly Func<Rectangle> _locateTrayIcon;
     private Bitmap _surface;
+    private TrayTipLayout _layout;
+    private Rectangle _anchorIcon;
     private bool _painting;
+    private bool _layoutApplying;
+    private bool _layoutQueued;
+    private bool _pendingLayout;
+    private int _pendingDpi;
 
     public QuotaTrayTipForm()
+        : this(null)
     {
+    }
+
+    public QuotaTrayTipForm(Func<Rectangle> locateTrayIcon)
+    {
+        _locateTrayIcon = locateTrayIcon;
+        _layout = TrayTipLayout.Create(_line1, _line2, 96, new Rectangle(0, 0, 1920, 1080));
+        AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(120, 52);
+        Size = _layout.WindowSize;
         BackColor = Color.FromArgb(36, 48, 62);
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
         if (Handle == IntPtr.Zero)
@@ -864,13 +1201,19 @@ internal sealed class QuotaTrayTipForm : Form
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == 0x0014)
+        if (m.Msg == 0x02E0) // WM_DPICHANGED
+        {
+            QueueOrApplyDisplayLayout((int)(m.WParam.ToInt64() & 0xFFFF));
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        if (m.Msg == 0x0014) // WM_ERASEBKGND
         {
             m.Result = (IntPtr)1;
             return;
         }
         base.WndProc(ref m);
-        if (m.Msg == 0x000F && !_painting && _surface != null)
+        if (m.Msg == 0x000F && !_painting && _surface != null) // WM_PAINT
         {
             _painting = true;
             try
@@ -881,6 +1224,10 @@ internal sealed class QuotaTrayTipForm : Form
             {
                 _painting = false;
             }
+        }
+        if (m.Msg == 0x007E || m.Msg == 0x001A) // WM_DISPLAYCHANGE / WM_SETTINGCHANGE
+        {
+            QueueOrApplyDisplayLayout(0);
         }
     }
 
@@ -901,25 +1248,27 @@ internal sealed class QuotaTrayTipForm : Form
 
     public void ShowTip(string line1, string line2, Color color1, Color color2, Rectangle icon)
     {
+        line1 = line1 ?? string.Empty;
+        line2 = line2 ?? string.Empty;
         bool textSame = _line1 == line1 && _line2 == line2 && _color1.ToArgb() == color1.ToArgb() && _color2.ToArgb() == color2.ToArgb();
         _line1 = line1;
         _line2 = line2;
         _color1 = color1;
         _color2 = color2;
-        Size measured = Measure();
-        Screen screen = Screen.FromRectangle(icon);
-        Point location = PopupAnchor.Above(icon, measured, 0, 0, measured, GlassTheme.TipGap, screen.Bounds);
-        if (textSame && Visible && Size == measured && Location == location)
+        if (icon.Width > 0 && icon.Height > 0)
+        {
+            _anchorIcon = icon;
+        }
+        bool layoutChanged = ApplyDisplayLayout(0);
+        if (textSame && Visible && !layoutChanged)
         {
             return;
         }
-        Size = measured;
-        Location = location;
+        Present();
         if (!Visible)
         {
             Show();
         }
-        Present();
     }
 
     public void HideTip()
@@ -930,64 +1279,166 @@ internal sealed class QuotaTrayTipForm : Form
         }
     }
 
-    private Size Measure()
+    private void QueueOrApplyDisplayLayout(int dpi)
     {
-        using (Font font = TipFont())
-        using (Bitmap bitmap = new Bitmap(1, 1))
-        using (Graphics g = Graphics.FromImage(bitmap))
+        if (dpi > 0)
         {
-            SizeF first = g.MeasureString(_line1, font);
-            SizeF second = g.MeasureString(_line2, font);
-            int width = (int)Math.Ceiling(Math.Max(first.Width, second.Width)) + 22;
-            int height = (int)Math.Ceiling(first.Height + second.Height) + 14;
-            return new Size(Math.Max(88, width), Math.Max(44, height));
+            _pendingDpi = dpi;
         }
+        _pendingLayout = true;
+        if (_layoutApplying)
+        {
+            return;
+        }
+        if (dpi > 0)
+        {
+            bool changed = ApplyDisplayLayout(dpi);
+            if (changed && Visible)
+            {
+                Present();
+            }
+            if (_pendingLayout)
+            {
+                QueueDeferredLayout();
+            }
+            return;
+        }
+        QueueDeferredLayout();
+    }
+
+    private void QueueDeferredLayout()
+    {
+        if (!Visible || IsDisposed || !IsHandleCreated || _layoutQueued)
+        {
+            return;
+        }
+        _layoutQueued = true;
+        try
+        {
+            BeginInvoke((Action)delegate
+            {
+                _layoutQueued = false;
+                if (!Visible || IsDisposed)
+                {
+                    _pendingLayout = false;
+                    _pendingDpi = 0;
+                    return;
+                }
+                if (_locateTrayIcon != null)
+                {
+                    try
+                    {
+                        Rectangle icon = _locateTrayIcon();
+                        if (icon.Width > 0 && icon.Height > 0)
+                        {
+                            _anchorIcon = icon;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+                int dpi = _pendingDpi;
+                _pendingDpi = 0;
+                _pendingLayout = false;
+                bool changed = ApplyDisplayLayout(dpi);
+                if (changed)
+                {
+                    Present();
+                }
+                if (_pendingLayout)
+                {
+                    QueueDeferredLayout();
+                }
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+            _layoutQueued = false;
+        }
+        catch (InvalidOperationException)
+        {
+            _layoutQueued = false;
+        }
+    }
+
+    private bool ApplyDisplayLayout(int dpi)
+    {
+        if (_anchorIcon.Width <= 0 || _anchorIcon.Height <= 0)
+        {
+            _pendingLayout = false;
+            _pendingDpi = 0;
+            return false;
+        }
+        if (_layoutApplying)
+        {
+            _pendingLayout = true;
+            if (dpi > 0)
+            {
+                _pendingDpi = dpi;
+            }
+            return false;
+        }
+
+        bool changed = false;
+        int nextDpi = dpi;
+        _layoutApplying = true;
+        try
+        {
+            for (int pass = 0; pass < 3; pass++)
+            {
+                _pendingLayout = false;
+                _pendingDpi = 0;
+                Rectangle workingArea = NativeMethods.GetMonitorWorkingArea(_anchorIcon);
+                if (nextDpi <= 0)
+                {
+                    nextDpi = NativeMethods.GetMonitorDpi(_anchorIcon, IsHandleCreated ? Handle : IntPtr.Zero);
+                }
+                TrayTipLayout nextLayout = TrayTipLayout.Create(_line1, _line2, nextDpi, workingArea);
+                Point location = PopupAnchor.Above(_anchorIcon, nextLayout.WindowSize, 0, 0, nextLayout.WindowSize, nextLayout.Gap, workingArea);
+                Rectangle nextBounds = new Rectangle(location, nextLayout.WindowSize);
+                changed = changed || _layout.Scale != nextLayout.Scale || _layout.WindowSize != nextLayout.WindowSize || _layout.LogicalSize != nextLayout.LogicalSize || Bounds != nextBounds;
+                _layout = nextLayout;
+                if (Bounds != nextBounds)
+                {
+                    Bounds = nextBounds;
+                }
+                if (!_pendingLayout)
+                {
+                    break;
+                }
+                nextDpi = _pendingDpi;
+            }
+        }
+        finally
+        {
+            _layoutApplying = false;
+        }
+        return changed;
     }
 
     private void Present()
     {
-        if (!IsHandleCreated || Width <= 0 || Height <= 0)
+        if (!IsHandleCreated || Width <= 0 || Height <= 0 || _painting)
         {
             return;
         }
-        if (_surface != null)
+        _painting = true;
+        try
         {
-            _surface.Dispose();
-        }
-        _surface = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb);
-        using (Graphics g = Graphics.FromImage(_surface))
-        using (GraphicsPath path = new GraphicsPath())
-        using (Font font = TipFont())
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.Transparent);
-            Rectangle box = new Rectangle(0, 0, Width - 1, Height - 1);
-            float d = 16;
-            path.AddArc(box.X, box.Y, d, d, 180, 90);
-            path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
-            path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
-            path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
-            path.CloseFigure();
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(235, 36, 48, 62)))
+            Bitmap next = TrayTipPainter.Render(_line1, _line2, _color1, _color2, _layout);
+            Bitmap old = _surface;
+            _surface = next;
+            NativeMethods.PresentLayered(Handle, _surface, Left, Top);
+            if (old != null)
             {
-                g.FillPath(fill, path);
-            }
-            using (SolidBrush first = new SolidBrush(_color1))
-            using (SolidBrush second = new SolidBrush(_color2))
-            {
-                float y = 7f;
-                g.DrawString(_line1, font, first, 11f, y);
-                SizeF size = g.MeasureString(_line1, font);
-                g.DrawString(_line2, font, second, 11f, y + size.Height - 2f);
+                old.Dispose();
             }
         }
-        NativeMethods.PresentLayered(Handle, _surface, Left, Top);
-    }
-
-    private static Font TipFont()
-    {
-        return new Font("Microsoft YaHei UI", 13f, FontStyle.Regular, GraphicsUnit.Pixel);
+        finally
+        {
+            _painting = false;
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -995,6 +1446,7 @@ internal sealed class QuotaTrayTipForm : Form
         if (disposing && _surface != null)
         {
             _surface.Dispose();
+            _surface = null;
         }
         base.Dispose(disposing);
     }
@@ -1053,6 +1505,216 @@ internal static class NativeMethods
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int Size;
+        public RECT Monitor;
+        public RECT Work;
+        public uint Flags;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromRect(ref RECT rect, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    private static IntPtr MonitorFor(Rectangle bounds)
+    {
+        RECT rect = new RECT();
+        rect.Left = bounds.Left;
+        rect.Top = bounds.Top;
+        rect.Right = bounds.Right;
+        rect.Bottom = bounds.Bottom;
+        return MonitorFromRect(ref rect, 2); // MONITOR_DEFAULTTONEAREST
+    }
+
+    public static Rectangle GetMonitorWorkingArea(Rectangle bounds)
+    {
+        MONITORINFO info = new MONITORINFO();
+        info.Size = Marshal.SizeOf(typeof(MONITORINFO));
+        if (GetMonitorInfo(MonitorFor(bounds), ref info))
+        {
+            return Rectangle.FromLTRB(info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom);
+        }
+        return Screen.FromRectangle(bounds).WorkingArea;
+    }
+
+    public static int GetMonitorDpi(Rectangle bounds, IntPtr hwnd)
+    {
+        RECT window;
+        if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out window)
+            && MonitorFor(Rectangle.FromLTRB(window.Left, window.Top, window.Right, window.Bottom)) == MonitorFor(bounds))
+        {
+            // Prefer the window's actual DPI after it reaches the target monitor.
+            int dpi = WindowDpi(hwnd);
+            if (dpi > 0) return dpi;
+        }
+        // A hidden popup can still be on its previous monitor before being positioned.
+        try
+        {
+            uint dpiX;
+            uint dpiY;
+            if (GetDpiForMonitor(MonitorFor(bounds), 0, out dpiX, out dpiY) == 0 && dpiX > 0)
+            {
+                return (int)dpiX;
+            }
+        }
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
+        int fallbackDpi = WindowDpi(hwnd);
+        if (fallbackDpi > 0) return fallbackDpi;
+        using (Graphics g = Graphics.FromHwnd(hwnd))
+        {
+            return (int)Math.Round(g.DpiX);
+        }
+    }
+
+    private static int WindowDpi(IntPtr hwnd)
+    {
+        try
+        {
+            return hwnd != IntPtr.Zero ? (int)GetDpiForWindow(hwnd) : 0;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return 0;
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int metric);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetricsForDpi(int metric, uint dpi);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForSystem();
+
+    [DllImport("user32.dll", EntryPoint = "LoadImageW", SetLastError = true)]
+    private static extern IntPtr LoadImage(IntPtr instance, IntPtr name, uint type, int width, int height, uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CopyImage(IntPtr image, uint type, int width, int height, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyCursor(IntPtr cursor);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetCursor();
+
+    [DllImport("user32.dll", EntryPoint = "SetCursor")]
+    public static extern IntPtr UseCursor(IntPtr cursor);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ICONINFO
+    {
+        public bool Icon;
+        public uint HotspotX;
+        public uint HotspotY;
+        public IntPtr Mask;
+        public IntPtr Color;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAP
+    {
+        public int Type;
+        public int Width;
+        public int Height;
+        public int WidthBytes;
+        public ushort Planes;
+        public ushort BitsPerPixel;
+        public IntPtr Bits;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetIconInfo(IntPtr image, out ICONINFO info);
+
+    [DllImport("gdi32.dll", EntryPoint = "GetObjectW")]
+    private static extern int GetBitmapObject(IntPtr bitmap, int size, out BITMAP info);
+
+    public static Size GetCursorImageSize(IntPtr cursor)
+    {
+        ICONINFO info;
+        if (cursor == IntPtr.Zero || !GetIconInfo(cursor, out info)) return Size.Empty;
+        try
+        {
+            BITMAP bitmap;
+            IntPtr image = info.Color != IntPtr.Zero ? info.Color : info.Mask;
+            if (GetBitmapObject(image, Marshal.SizeOf(typeof(BITMAP)), out bitmap) == 0) return Size.Empty;
+            return new Size(bitmap.Width, info.Color != IntPtr.Zero ? bitmap.Height : bitmap.Height / 2);
+        }
+        finally
+        {
+            if (info.Mask != IntPtr.Zero) DeleteObject(info.Mask);
+            if (info.Color != IntPtr.Zero) DeleteObject(info.Color);
+        }
+    }
+
+    private static IntPtr SharedCursor(int identifier)
+    {
+        return LoadImage(IntPtr.Zero, new IntPtr(identifier), 2, 0, 0, 0x8040); // IMAGE_CURSOR, LR_SHARED | LR_DEFAULTSIZE
+    }
+
+    public static Size GetCursorSize(int dpi)
+    {
+        dpi = dpi > 0 ? dpi : 96;
+        int systemDpi;
+        int width;
+        int height;
+        try
+        {
+            systemDpi = (int)GetDpiForSystem();
+            width = GetSystemMetricsForDpi(13, (uint)dpi);
+            height = GetSystemMetricsForDpi(14, (uint)dpi);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero)) systemDpi = (int)Math.Round(graphics.DpiX);
+            width = (int)Math.Round(GetSystemMetrics(13) * dpi / (double)Math.Max(96, systemDpi));
+            height = (int)Math.Round(GetSystemMetrics(14) * dpi / (double)Math.Max(96, systemDpi));
+        }
+        // Retain an enlarged system pointer scheme instead of forcing the default 32-pixel design.
+        Size systemPointer = GetCursorImageSize(SharedCursor(32512));
+        double scale = dpi / (double)Math.Max(96, systemDpi);
+        return new Size(Math.Max(Math.Max(1, width), (int)Math.Round(systemPointer.Width * scale)),
+            Math.Max(Math.Max(1, height), (int)Math.Round(systemPointer.Height * scale)));
+    }
+
+    public static IntPtr LoadDpiCursor(int identifier, Size size)
+    {
+        IntPtr source = SharedCursor(identifier);
+        if (source == IntPtr.Zero) return IntPtr.Zero;
+        // Shared LoadImage handles can ignore the requested size. Reload the best native resource
+        // into an owned handle so arrow and hand both have the target monitor's pixel dimensions.
+        IntPtr copy = CopyImage(source, 2, size.Width, size.Height, 0x4000); // LR_COPYFROMRESOURCE
+        if (copy == IntPtr.Zero) copy = CopyImage(source, 2, size.Width, size.Height, 0);
+        if (copy != IntPtr.Zero && GetCursorImageSize(copy) != size)
+        {
+            IntPtr resized = CopyImage(copy, 2, size.Width, size.Height, 0);
+            if (resized != IntPtr.Zero)
+            {
+                DestroyCursor(copy);
+                copy = resized;
+            }
+        }
+        return copy;
+    }
+
+    public static void ReleaseDpiCursor(IntPtr cursor, int identifier)
+    {
+        if (GetCursor() == cursor) UseCursor(SharedCursor(identifier));
+        DestroyCursor(cursor);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1293,11 +1955,11 @@ internal sealed class QuotaApplicationContext : ApplicationContext
 
     public QuotaApplicationContext(bool showOnStart)
     {
-        _popup = new QuotaPopupForm(RefreshQuota, ClosePopup);
+        _popup = new QuotaPopupForm(RefreshQuota, ClosePopup, TraySlot);
         if (_popup.Handle == IntPtr.Zero)
         {
         }
-        _trayTip = new QuotaTrayTipForm();
+        _trayTip = new QuotaTrayTipForm(TraySlot);
         if (_trayTip.Handle == IntPtr.Zero)
         {
         }
