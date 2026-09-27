@@ -86,7 +86,7 @@ Cursor 的额度按**当前计费月**计算，不是 ChatGPT Codex 那种 5 小
 
 ## macOS 安装（推荐）
 
-双击 [`Mac/Packages/Cursor额度仪表盘-1.3.0.dmg`](Mac/Packages/Cursor额度仪表盘-1.3.0.dmg)，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
+双击 [`Mac/Packages/Cursor额度仪表盘-1.4.0.dmg`](Mac/Packages/Cursor额度仪表盘-1.4.0.dmg)，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
 
 这是菜单栏应用：启动后请看屏幕右上角，不会在 Dock 常驻。首次打开若被系统拦截，按住 Control 单击应用并选择「打开」。
 
@@ -97,7 +97,7 @@ chmod +x "./Mac/Codings/pack-dmg.sh"
 ./Mac/Codings/pack-dmg.sh
 ```
 
-会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.3.0.dmg`。
+会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.4.0.dmg`。
 
 ## macOS 从源码启动
 
