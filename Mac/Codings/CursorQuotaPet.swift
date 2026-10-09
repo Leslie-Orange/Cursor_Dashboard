@@ -104,17 +104,19 @@ enum QuotaParser {
             ?? JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "plan"]))
         let summaryPlan = JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "plan"]))
 
-        let autoUsedPercent = firstPercent([
+        let autoUsedPercent = firstPoints([
             JSONValue.value(planUsage, names: ["autoPercentUsed"]),
             JSONValue.value(summaryPlan, names: ["autoPercentUsed"]),
-            percentFromMessage(JSONValue.value(summary, names: ["autoModelSelectedDisplayMessage"]))
+            JSONValue.value(dashboard, names: ["autoModelSelectedDisplayMessage"]),
+            JSONValue.value(summary, names: ["autoModelSelectedDisplayMessage"])
         ])
-        let otherUsedPercent = firstPercent([
+        let otherUsedPercent = firstPoints([
             JSONValue.value(planUsage, names: ["apiPercentUsed"]),
             JSONValue.value(summaryPlan, names: ["apiPercentUsed"]),
-            percentFromMessage(JSONValue.value(summary, names: ["namedModelSelectedDisplayMessage"]))
+            JSONValue.value(dashboard, names: ["namedModelSelectedDisplayMessage"]),
+            JSONValue.value(summary, names: ["namedModelSelectedDisplayMessage"])
         ])
-        let totalUsedPercent = firstPercent([
+        let totalUsedPercent = firstPoints([
             JSONValue.value(planUsage, names: ["totalPercentUsed"]),
             JSONValue.value(summaryPlan, names: ["totalPercentUsed"])
         ])
@@ -129,25 +131,24 @@ enum QuotaParser {
             ?? JSONValue.number(JSONValue.value(summaryPlan, names: ["remaining"]))
             ?? combinedRemaining(used: includedSpend, limit: centsLimit)
 
-        let includedUsedPercent: Double?
-        if let centsLimit, centsLimit > 0 {
-            if let centsRemaining {
-                includedUsedPercent = JSONValue.percent(1 - centsRemaining / centsLimit)
-            } else if let includedSpend {
-                includedUsedPercent = JSONValue.percent(includedSpend / centsLimit)
-            } else {
-                includedUsedPercent = nil
-            }
+        let allowance: (used: Double, remaining: Double)?
+        if let centsLimit, centsLimit > 0, let includedSpend {
+            let used = clampPercent(includedSpend / centsLimit * 100)
+            allowance = (used, clampPercent(100 - used))
+        } else if let centsLimit, centsLimit > 0, let centsRemaining {
+            let remaining = clampPercent(centsRemaining / centsLimit * 100)
+            allowance = (clampPercent(100 - remaining), remaining)
+        } else if let messageUsed = firstPoints([
+            JSONValue.value(dashboard, names: ["displayMessage"]),
+            JSONValue.value(summary, names: ["displayMessage"])
+        ]) {
+            allowance = (messageUsed, clampPercent(100 - messageUsed))
         } else {
-            includedUsedPercent = nil
+            allowance = nil
         }
 
-        // 内置 = Cursor 自带模型池（Auto / Composer），与设置页第一根用量条对齐。
-        let builtinUsedPercent = autoUsedPercent ?? includedUsedPercent ?? totalUsedPercent
-        var builtinRemaining = builtinUsedPercent.map { min(100, max(0, 100 - $0)) }
-        if builtinRemaining == nil, let centsLimit, centsLimit > 0, let centsRemaining {
-            builtinRemaining = JSONValue.percent(centsRemaining / centsLimit)
-        }
+        let builtinUsedPercent = autoUsedPercent ?? totalUsedPercent
+        var builtinRemaining = builtinUsedPercent.map { clampPercent(100 - $0) }
 
         let requestBucket = requestBucket(from: authUsage) ?? requestBucket(from: summaryPlan)
         if builtinRemaining == nil, let bucket = requestBucket, bucket.limit > 0 {
@@ -186,26 +187,37 @@ enum QuotaParser {
         let onDemandEnabled = onDemand?["enabled"] as? Bool ?? false
         let onDemandUsed = JSONValue.number(JSONValue.value(onDemand, names: ["used"]))
 
-        guard builtinRemaining != nil || otherUsedPercent != nil || requestBucket != nil else {
+        let quotaIsAllowance = allowance != nil
+        let primaryRemaining = allowance?.remaining ?? builtinRemaining
+        guard primaryRemaining != nil || otherUsedPercent != nil || requestBucket != nil else {
             return nil
         }
 
-        let totalDetail = amountDetail(
-            used: includedSpend,
-            remaining: centsRemaining,
-            limit: centsLimit,
-            request: requestBucket,
-            onDemandEnabled: onDemandEnabled,
-            onDemandUsed: onDemandUsed
-        )
+        let totalDetail = quotaIsAllowance
+            ? amountDetail(
+                used: includedSpend,
+                remaining: centsRemaining,
+                limit: centsLimit,
+                request: nil,
+                onDemandEnabled: onDemandEnabled,
+                onDemandUsed: onDemandUsed
+            )
+            : amountDetail(
+                used: includedSpend,
+                remaining: centsRemaining,
+                limit: centsLimit,
+                request: requestBucket,
+                onDemandEnabled: onDemandEnabled,
+                onDemandUsed: onDemandUsed
+            )
 
         let primary = QuotaWindow(
-            remaining: builtinRemaining,
-            used: builtinUsedPercent ?? builtinRemaining.map { 100 - $0 },
+            remaining: primaryRemaining,
+            used: allowance?.used ?? builtinUsedPercent ?? builtinRemaining.map { 100 - $0 },
             resetAt: resetAt,
             windowMinutes: windowMinutes,
-            badge: "内置",
-            title: "内置模型剩余",
+            badge: quotaIsAllowance ? "额度" : "内置",
+            title: quotaIsAllowance ? "套餐剩余" : "内置模型剩余",
             detail: totalDetail
         )
 
@@ -261,10 +273,10 @@ enum QuotaParser {
         return nil
     }
 
-    private static func firstPercent(_ values: [Any?]) -> Double? {
+    private static func firstPoints(_ values: [Any?]) -> Double? {
         for value in values {
-            if let percent = JSONValue.percent(JSONValue.number(value)) {
-                return percent
+            if let number = JSONValue.number(value) {
+                return clampPercent(number)
             }
             if let percent = percentFromMessage(value) {
                 return percent
@@ -273,15 +285,21 @@ enum QuotaParser {
         return nil
     }
 
+    private static func clampPercent(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(100, max(0, value))
+    }
+
     private static func percentFromMessage(_ value: Any?) -> Double? {
         guard let string = JSONValue.string(value) else { return nil }
         guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*%"#) else { return nil }
         let range = NSRange(string.startIndex..<string.endIndex, in: string)
         guard let match = regex.firstMatch(in: string, range: range),
-              let numberRange = Range(match.range(at: 1), in: string) else {
+              let numberRange = Range(match.range(at: 1), in: string),
+              let number = Double(string[numberRange]) else {
             return nil
         }
-        return JSONValue.percent(Double(string[numberRange]))
+        return clampPercent(number)
     }
 
     private static func combinedRemaining(used: Double?, limit: Double?) -> Double? {
@@ -1235,7 +1253,7 @@ private struct QuotaCard: View {
                     .monospacedDigit()
                     .contentTransition(.numericText())
                 Text(
-                    QuotaFormatter.burnRatePerDay(
+                    window.detail ?? QuotaFormatter.burnRatePerDay(
                         used: window.used,
                         remaining: window.remaining,
                         resetAt: window.resetAt,

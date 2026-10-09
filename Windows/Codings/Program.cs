@@ -177,14 +177,24 @@ internal static class CursorQuotaPetMain
         {
             throw new Exception("parser returned null");
         }
-        if (Math.Abs(snapshot.Primary.Remaining.Value - 74) > 0.1)
+        if (Math.Abs(snapshot.Primary.Remaining.Value - 75) > 0.1)
         {
-            throw new Exception("builtin remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
+            throw new Exception("allowance remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
+        }
+        if (snapshot.Primary.Badge != "额度")
+        {
+            throw new Exception("allowance badge " + snapshot.Primary.Badge);
+        }
+        if (snapshot.Primary.Detail != "$5 / $20")
+        {
+            throw new Exception("allowance detail " + snapshot.Primary.Detail);
         }
         if (Math.Abs(snapshot.Secondary.Remaining.Value - 100) > 0.1)
         {
             throw new Exception("other remain");
         }
+        TestLiveAllowance();
+        TestSmallPoolPercent();
         if (QuotaFormatter.PlanTitle(snapshot.PlanType) != "Pro 额度")
         {
             throw new Exception("plan title " + QuotaFormatter.PlanTitle(snapshot.PlanType));
@@ -192,6 +202,59 @@ internal static class CursorQuotaPetMain
         if (QuotaFormatter.Percent(10) != "10%")
         {
             throw new Exception("percent format");
+        }
+    }
+
+    private static void TestLiveAllowance()
+    {
+        Dictionary<string, object> planUsage = new Dictionary<string, object>();
+        planUsage["includedSpend"] = 508;
+        planUsage["remaining"] = 1492;
+        planUsage["limit"] = 2000;
+        planUsage["autoPercentUsed"] = 1.1289;
+        planUsage["apiPercentUsed"] = 0;
+        planUsage["totalPercentUsed"] = 1.0751;
+        Dictionary<string, object> dashboard = new Dictionary<string, object>();
+        dashboard["planUsage"] = planUsage;
+        dashboard["displayMessage"] = "You've used 25% of your included usage";
+        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
+        if (snapshot == null)
+        {
+            throw new Exception("live allowance parser returned null");
+        }
+        if (Math.Abs(snapshot.Primary.Remaining.Value - 74.6) > 0.05)
+        {
+            throw new Exception("live allowance remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
+        }
+        if (snapshot.Primary.Detail != "$5.08 / $20")
+        {
+            throw new Exception("live allowance detail " + snapshot.Primary.Detail);
+        }
+        if (Math.Abs(snapshot.Secondary.Remaining.Value - 100) > 0.1)
+        {
+            throw new Exception("live other remain");
+        }
+    }
+
+    private static void TestSmallPoolPercent()
+    {
+        Dictionary<string, object> planUsage = new Dictionary<string, object>();
+        planUsage["autoPercentUsed"] = 0.7;
+        planUsage["apiPercentUsed"] = 0;
+        Dictionary<string, object> dashboard = new Dictionary<string, object>();
+        dashboard["planUsage"] = planUsage;
+        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
+        if (snapshot == null)
+        {
+            throw new Exception("small pool parser returned null");
+        }
+        if (snapshot.Primary.Badge != "内置")
+        {
+            throw new Exception("small pool badge " + snapshot.Primary.Badge);
+        }
+        if (Math.Abs(snapshot.Primary.Remaining.Value - 99.3) > 0.05)
+        {
+            throw new Exception("small pool remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
         }
     }
 

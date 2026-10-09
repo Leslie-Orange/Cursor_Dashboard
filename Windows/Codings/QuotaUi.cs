@@ -575,8 +575,9 @@ internal static class DetailPainter
             window != null ? window.ResetAt : (double?)null,
             window != null ? window.WindowMinutes : (double?)null);
 
-        RectangleF text = new RectangleF(rect.X + 80, rect.Y + 16, rect.Width - 80 - 92, 22);
-        RectangleF sub = new RectangleF(rect.X + 80, rect.Y + 42, rect.Width - 80 - 92, 22);
+        float rightReserve = window != null && !string.IsNullOrEmpty(window.Detail) ? 118f : 92f;
+        RectangleF text = new RectangleF(rect.X + 80, rect.Y + 16, Math.Max(40, rect.Width - 80 - rightReserve), 22);
+        RectangleF sub = new RectangleF(rect.X + 80, rect.Y + 42, Math.Max(40, rect.Width - 80 - rightReserve), 22);
         using (StringFormat format = new StringFormat())
         {
             format.Trimming = StringTrimming.EllipsisCharacter;
@@ -600,9 +601,10 @@ internal static class DetailPainter
             format.Alignment = StringAlignment.Far;
             format.LineAlignment = StringAlignment.Near;
             RectangleF percentBox = new RectangleF(rect.Right - 96, rect.Y + 12, 82, 28);
-            RectangleF burnBox = new RectangleF(rect.Right - 96, rect.Y + 44, 82, 20);
+            RectangleF burnBox = new RectangleF(rect.Right - 108, rect.Y + 44, 94, 20);
+            string side = window != null && !string.IsNullOrEmpty(window.Detail) ? window.Detail : burn;
             g.DrawString(percent, percentFont, percentBrush, percentBox, format);
-            g.DrawString(burn, burnFont, mutedBrush, burnBox, format);
+            g.DrawString(side, burnFont, mutedBrush, burnBox, format);
         }
     }
 
@@ -2143,8 +2145,8 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         double? primary = snapshot != null && snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null;
         double? secondary = snapshot != null && snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null;
         _trayTip.ShowTip(
-            "内置 " + QuotaFormatter.Percent(primary),
-            "其他 " + QuotaFormatter.Percent(secondary),
+            QuotaFormatter.Line(snapshot != null ? snapshot.Primary : null, "额度"),
+            QuotaFormatter.Line(snapshot != null ? snapshot.Secondary : null, "其他"),
             GlassTheme.Emphasis(primary),
             GlassTheme.Emphasis(secondary),
             icon);

@@ -16,6 +16,7 @@ internal sealed class QuotaWindow
     public double? WindowMinutes;
     public string Badge;
     public string Title;
+    public string Detail;
 }
 
 internal sealed class QuotaSnapshot
@@ -176,15 +177,17 @@ internal static class QuotaParser
         }
         Dictionary<string, object> summaryPlan = JsonValue.Nested(summary, "individualUsage", "plan");
 
-        double? autoUsed = FirstPercent(
+        double? autoUsed = FirstPoints(
             JsonValue.Get(planUsage, "autoPercentUsed"),
             JsonValue.Get(summaryPlan, "autoPercentUsed"),
+            JsonValue.Get(dashboard, "autoModelSelectedDisplayMessage"),
             JsonValue.Get(summary, "autoModelSelectedDisplayMessage"));
-        double? otherUsed = FirstPercent(
+        double? otherUsed = FirstPoints(
             JsonValue.Get(planUsage, "apiPercentUsed"),
             JsonValue.Get(summaryPlan, "apiPercentUsed"),
+            JsonValue.Get(dashboard, "namedModelSelectedDisplayMessage"),
             JsonValue.Get(summary, "namedModelSelectedDisplayMessage"));
-        double? totalUsed = FirstPercent(
+        double? totalUsed = FirstPoints(
             JsonValue.Get(planUsage, "totalPercentUsed"),
             JsonValue.Get(summaryPlan, "totalPercentUsed"));
 
@@ -217,28 +220,35 @@ internal static class QuotaParser
             centsRemaining = Math.Max(0, centsLimit.Value - includedSpend.Value);
         }
 
-        double? includedUsed = null;
-        if (centsLimit.HasValue && centsLimit.Value > 0)
+        double? allowanceUsed = null;
+        double? allowanceRemaining = null;
+        if (centsLimit.HasValue && centsLimit.Value > 0 && includedSpend.HasValue)
         {
-            if (centsRemaining.HasValue)
+            allowanceUsed = ClampPercent(includedSpend.Value / centsLimit.Value * 100.0);
+            allowanceRemaining = ClampPercent(100.0 - allowanceUsed.Value);
+        }
+        else if (centsLimit.HasValue && centsLimit.Value > 0 && centsRemaining.HasValue)
+        {
+            allowanceRemaining = ClampPercent(centsRemaining.Value / centsLimit.Value * 100.0);
+            allowanceUsed = ClampPercent(100.0 - allowanceRemaining.Value);
+        }
+        if (!allowanceRemaining.HasValue)
+        {
+            double? messageUsed = FirstPoints(
+                JsonValue.Get(dashboard, "displayMessage"),
+                JsonValue.Get(summary, "displayMessage"));
+            if (messageUsed.HasValue)
             {
-                includedUsed = JsonValue.Percent(1.0 - centsRemaining.Value / centsLimit.Value);
-            }
-            else if (includedSpend.HasValue)
-            {
-                includedUsed = JsonValue.Percent(includedSpend.Value / centsLimit.Value);
+                allowanceUsed = messageUsed;
+                allowanceRemaining = ClampPercent(100.0 - messageUsed.Value);
             }
         }
 
-        double? builtinUsed = autoUsed ?? includedUsed ?? totalUsed;
+        double? builtinUsed = autoUsed ?? totalUsed;
         double? builtinRemaining = null;
         if (builtinUsed.HasValue)
         {
-            builtinRemaining = Math.Min(100, Math.Max(0, 100 - builtinUsed.Value));
-        }
-        if (!builtinRemaining.HasValue && centsLimit.HasValue && centsLimit.Value > 0 && centsRemaining.HasValue)
-        {
-            builtinRemaining = JsonValue.Percent(centsRemaining.Value / centsLimit.Value);
+            builtinRemaining = ClampPercent(100.0 - builtinUsed.Value);
         }
 
         double bucketUsed;
@@ -288,7 +298,12 @@ internal static class QuotaParser
             planType = localPlan;
         }
 
-        if (!builtinRemaining.HasValue && !otherUsed.HasValue && !hasBucket)
+        bool quotaIsAllowance = allowanceRemaining.HasValue;
+        double? primaryRemaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
+        double? primaryUsed = quotaIsAllowance
+            ? allowanceUsed
+            : (builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null));
+        if (!primaryRemaining.HasValue && !otherUsed.HasValue && !hasBucket)
         {
             return null;
         }
@@ -298,12 +313,13 @@ internal static class QuotaParser
         snapshot.SampledAt = sampledAt;
         snapshot.SourceName = sourceName;
         snapshot.Primary = new QuotaWindow();
-        snapshot.Primary.Remaining = builtinRemaining;
-        snapshot.Primary.Used = builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null);
+        snapshot.Primary.Remaining = primaryRemaining;
+        snapshot.Primary.Used = primaryUsed;
         snapshot.Primary.ResetAt = cycleEnd;
         snapshot.Primary.WindowMinutes = windowMinutes;
-        snapshot.Primary.Badge = "内置";
-        snapshot.Primary.Title = "内置模型剩余";
+        snapshot.Primary.Badge = quotaIsAllowance ? "额度" : "内置";
+        snapshot.Primary.Title = quotaIsAllowance ? "套餐剩余" : "内置模型剩余";
+        snapshot.Primary.Detail = quotaIsAllowance ? AllowanceDetail(includedSpend, centsRemaining, centsLimit) : null;
         snapshot.Secondary = new QuotaWindow();
         snapshot.Secondary.ResetAt = cycleEnd;
         snapshot.Secondary.WindowMinutes = windowMinutes;
@@ -340,7 +356,7 @@ internal static class QuotaParser
         return null;
     }
 
-    private static double? FirstPercent(params object[] values)
+    private static double? FirstPoints(params object[] values)
     {
         if (values == null)
         {
@@ -348,12 +364,12 @@ internal static class QuotaParser
         }
         for (int i = 0; i < values.Length; i++)
         {
-            double? number = JsonValue.Percent(JsonValue.Number(values[i]));
+            double? number = JsonValue.Number(values[i]);
             if (number.HasValue)
             {
-                return number;
+                return ClampPercent(number.Value);
             }
-            double? fromText = PercentFromMessage(values[i]);
+            double? fromText = PointsFromMessage(values[i]);
             if (fromText.HasValue)
             {
                 return fromText;
@@ -362,7 +378,44 @@ internal static class QuotaParser
         return null;
     }
 
-    private static double? PercentFromMessage(object value)
+    private static double ClampPercent(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return 0;
+        }
+        return Math.Min(100.0, Math.Max(0.0, value));
+    }
+
+    private static string AllowanceDetail(double? spendCents, double? remainingCents, double? limitCents)
+    {
+        if (!limitCents.HasValue || limitCents.Value < 100)
+        {
+            return null;
+        }
+        double? used = spendCents;
+        if (!used.HasValue && remainingCents.HasValue)
+        {
+            used = Math.Max(0, limitCents.Value - remainingCents.Value);
+        }
+        if (!used.HasValue)
+        {
+            return null;
+        }
+        return Dollars(used.Value) + " / " + Dollars(limitCents.Value);
+    }
+
+    private static string Dollars(double cents)
+    {
+        double dollars = cents / 100.0;
+        if (Math.Abs(dollars - Math.Round(dollars)) < 0.001)
+        {
+            return "$" + Math.Round(dollars).ToString("0", CultureInfo.InvariantCulture);
+        }
+        return "$" + dollars.ToString("0.00", CultureInfo.InvariantCulture);
+    }
+
+    private static double? PointsFromMessage(object value)
     {
         string text = JsonValue.Text(value);
         if (text == null)
@@ -395,7 +448,7 @@ internal static class QuotaParser
         {
             return null;
         }
-        return JsonValue.Percent(parsed);
+        return ClampPercent(parsed);
     }
 
     private static bool RequestBucket(Dictionary<string, object> root, out double used, out double limit)
@@ -464,6 +517,12 @@ internal static class QuotaFormatter
             return "—";
         }
         return string.Format(CultureInfo.InvariantCulture, "{0:0}%", Math.Round(value.Value));
+    }
+
+    public static string Line(QuotaWindow window, string fallbackBadge)
+    {
+        string badge = window != null && !string.IsNullOrEmpty(window.Badge) ? window.Badge : fallbackBadge;
+        return badge + " " + Percent(window != null ? window.Remaining : (double?)null);
     }
 
     public static string ShortNumber(double? value)
