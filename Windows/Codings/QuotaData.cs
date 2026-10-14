@@ -298,7 +298,9 @@ internal static class QuotaParser
             planType = localPlan;
         }
 
-        bool quotaIsAllowance = allowanceRemaining.HasValue;
+        // Each model pool has its own limit. The legacy monetary allowance can
+        // be exhausted while the Cursor Models pool still has usage remaining.
+        bool quotaIsAllowance = !autoUsed.HasValue && allowanceRemaining.HasValue;
         double? primaryRemaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
         double? primaryUsed = quotaIsAllowance
             ? allowanceUsed
@@ -1488,9 +1490,23 @@ internal static class SnapshotCache
             {
                 return null;
             }
-            object parsed = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(PathName(), Encoding.UTF8));
+            return Parse(File.ReadAllText(PathName(), Encoding.UTF8));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static QuotaSnapshot Parse(string json)
+    {
+        try
+        {
+            object parsed = new JavaScriptSerializer().DeserializeObject(json);
             Dictionary<string, object> map = JsonValue.Map(parsed);
-            if (map == null)
+            // Old snapshots used monetary allowance for the primary value.
+            // Do not display that value as a model pool after an offline update.
+            if (map == null || JsonValue.Number(JsonValue.Get(map, "quotaFormatVersion")) != 2)
             {
                 return null;
             }
@@ -1542,6 +1558,7 @@ internal static class SnapshotCache
             double sampled = (snapshot.SampledAt.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
             StringBuilder json = new StringBuilder();
             json.Append("{\n");
+            json.Append("  \"quotaFormatVersion\": 2,\n");
             json.Append("  \"planType\": ").Append(JsonString(snapshot.PlanType)).Append(",\n");
             json.Append("  \"totalRemain\": ").Append(JsonNumber(snapshot.Primary.Remaining)).Append(",\n");
             json.Append("  \"totalUsed\": ").Append(JsonNumber(snapshot.Primary.Used)).Append(",\n");
@@ -1718,6 +1735,11 @@ internal sealed class CursorUsageClient
         {
             CurrentError = "";
             SnapshotCache.Save(snapshot);
+            if (Environment.GetEnvironmentVariable("QUOTA_DEBUG") == "1")
+            {
+                Console.WriteLine("DEBUG_PRIMARY_REMAIN=" + snapshot.Primary.Remaining);
+                Console.WriteLine("DEBUG_OTHER_REMAIN=" + snapshot.Secondary.Remaining);
+            }
             return snapshot;
         }
         CurrentError = Friendly(FirstError(slots));

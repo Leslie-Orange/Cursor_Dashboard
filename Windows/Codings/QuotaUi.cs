@@ -2145,7 +2145,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         double? primary = snapshot != null && snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null;
         double? secondary = snapshot != null && snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null;
         _trayTip.ShowTip(
-            QuotaFormatter.Line(snapshot != null ? snapshot.Primary : null, "额度"),
+            QuotaFormatter.Line(snapshot != null ? snapshot.Primary : null, "内置"),
             QuotaFormatter.Line(snapshot != null ? snapshot.Secondary : null, "其他"),
             GlassTheme.Emphasis(primary),
             GlassTheme.Emphasis(secondary),
