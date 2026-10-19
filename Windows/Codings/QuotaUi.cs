@@ -1460,7 +1460,7 @@ internal static class TrayIconFactory
     {
         using (Bitmap bitmap = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
         using (Graphics g = Graphics.FromImage(bitmap))
-        using (Font font = new Font("Segoe UI", 8f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (Font font = new Font("Segoe UI Semibold", 9f, FontStyle.Regular, GraphicsUnit.Pixel))
         using (SolidBrush primaryBrush = new SolidBrush(GlassTheme.Emphasis(primary)))
         using (SolidBrush secondaryBrush = new SolidBrush(GlassTheme.Emphasis(secondary)))
         using (StringFormat format = new StringFormat())
@@ -1468,14 +1468,24 @@ internal static class TrayIconFactory
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
-            using (SolidBrush plate = new SolidBrush(Color.FromArgb(235, 36, 48, 62)))
+            using (Pen ring = new Pen(Color.FromArgb(96, GlassTheme.Cyan), 1.75f))
+            using (Pen mint = new Pen(Color.FromArgb(64, GlassTheme.Mint), 1.15f))
             {
-                g.FillEllipse(plate, 1, 1, 30, 30);
+                g.DrawEllipse(ring, 1.25f, 1.25f, 29.5f, 29.5f);
+                g.DrawEllipse(mint, 2.4f, 2.4f, 27.2f, 27.2f);
+            }
+            using (SolidBrush plate = new SolidBrush(Color.FromArgb(230, 248, 250, 252)))
+            {
+                g.FillEllipse(plate, 3f, 3f, 26f, 26f);
+            }
+            using (Pen highlight = new Pen(Color.FromArgb(170, 255, 255, 255), 1.6f))
+            {
+                g.DrawArc(highlight, 7f, 5.5f, 13f, 11f, 205f, 95f);
             }
             format.Alignment = StringAlignment.Center;
             format.LineAlignment = StringAlignment.Center;
-            g.DrawString(QuotaFormatter.ShortNumber(primary), font, primaryBrush, new RectangleF(0, 2, 32, 14), format);
-            g.DrawString(QuotaFormatter.ShortNumber(secondary), font, secondaryBrush, new RectangleF(0, 15, 32, 14), format);
+            g.DrawString(QuotaFormatter.ShortNumber(primary), font, primaryBrush, new RectangleF(1f, 2f, 30f, 14f), format);
+            g.DrawString(QuotaFormatter.ShortNumber(secondary), font, secondaryBrush, new RectangleF(1f, 16f, 30f, 14f), format);
             IntPtr handle = bitmap.GetHicon();
             Icon created = Icon.FromHandle(handle);
             Icon clone = (Icon)created.Clone();
@@ -1790,6 +1800,12 @@ internal static class NativeMethods
     public static extern bool ShowWindow(IntPtr hwnd, int command);
 
     [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
     public static void KeepTopmost(IntPtr hwnd)
@@ -1974,7 +1990,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         _notifyIcon = new NotifyIcon();
         _notifyIcon.Visible = true;
         _notifyIcon.Text = "";
-        _notifyIcon.ContextMenuStrip = _menu;
+        _notifyIcon.ContextMenuStrip = null;
         _notifyIcon.MouseMove += OnTrayMouseMove;
         _notifyIcon.MouseDown += delegate { HideTip(); };
         _notifyIcon.MouseUp += OnTrayMouseUp;
@@ -2166,7 +2182,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         HideTip();
         if (e.Button == MouseButtons.Right)
         {
-            QueueTrayMenuFallback();
+            ShowTrayContextMenu();
             return;
         }
         if (e.Button != MouseButtons.Left)
@@ -2187,27 +2203,43 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         }
     }
 
-    private void QueueTrayMenuFallback()
+    // NotifyIcon never activates a ContextMenuStrip, so the first click is swallowed until
+    // some other window (the left-click popup) has foreground. SetForegroundWindow on the
+    // icon's hidden native window fixes that; WM_NULL lets the menu dismiss on an outside click.
+    private void ShowTrayContextMenu()
     {
-        if (_menu.IsDisposed)
+        if (_menu.IsDisposed || _menu.Visible)
         {
             return;
         }
 
-        Point screenPoint = Control.MousePosition;
+        NativeWindow notifyWindow = null;
         try
         {
-            _popup.BeginInvoke((Action)delegate
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo windowField = typeof(NotifyIcon).GetField("window", flags);
+            if (windowField == null)
             {
-                if (_menu.IsDisposed || _menu.Visible)
-                {
-                    return;
-                }
-                _menu.Show(screenPoint);
-            });
+                windowField = typeof(NotifyIcon).GetField("_window", flags);
+            }
+            if (windowField != null)
+            {
+                notifyWindow = windowField.GetValue(_notifyIcon) as NativeWindow;
+            }
         }
         catch
         {
+            notifyWindow = null;
+        }
+
+        if (notifyWindow != null && notifyWindow.Handle != IntPtr.Zero)
+        {
+            NativeMethods.SetForegroundWindow(notifyWindow.Handle);
+        }
+        _menu.Show(Control.MousePosition);
+        if (notifyWindow != null && notifyWindow.Handle != IntPtr.Zero)
+        {
+            NativeMethods.PostMessage(notifyWindow.Handle, 0x0000 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero);
         }
     }
 
