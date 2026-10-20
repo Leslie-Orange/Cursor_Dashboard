@@ -1146,17 +1146,122 @@ private struct GlassIconButton: View {
     private let size: CGFloat = 28
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: size, height: size)
-                .contentShape(Circle())
+        Image(systemName: systemName)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: size, height: size)
+            .modifier(GlassCircleBackground())
+            .overlay {
+                PointingHandHitArea(toolTip: accessibilityLabel, action: action)
+                    .frame(width: size, height: size)
+            }
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default, action)
+            .help(accessibilityLabel)
+    }
+}
+
+private struct PointingHandHitArea: NSViewRepresentable {
+    let toolTip: String
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> PointingHandHitView {
+        let view = PointingHandHitView()
+        view.setAccessibilityElement(false)
+        view.toolTip = toolTip
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ view: PointingHandHitView, context: Context) {
+        view.toolTip = toolTip
+        view.action = action
+    }
+}
+
+private final class PointingHandHitView: NSView {
+    var action: (() -> Void)?
+    private var installedTrackingAreas: [NSTrackingArea] = []
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        containsLocalPoint(convert(point, from: superview)) ? self : nil
+    }
+
+    private func containsLocalPoint(_ point: NSPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        let radius = min(bounds.width, bounds.height) / 2
+        return dx * dx + dy * dy <= radius * radius
+    }
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        installedTrackingAreas.forEach(removeTrackingArea)
+        let optionSets: [NSTrackingArea.Options] = [
+            [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeInActiveApp, .inVisibleRect]
+        ]
+        installedTrackingAreas = optionSets.map { options in
+            let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+            addTrackingArea(area)
+            return area
         }
-        .buttonStyle(.plain)
-        .modifier(GlassCircleBackground())
-        .accessibilityLabel(accessibilityLabel)
-        .help(accessibilityLabel)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateTrackingAreas()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        if !containsLocalPoint(local) {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        NSCursor.pointingHand.set()
+        var inside = true
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            inside = containsLocalPoint(convert(next.locationInWindow, from: nil))
+            if next.type == .leftMouseUp { break }
+        }
+        guard inside else { return }
+        let action = action
+        DispatchQueue.main.async {
+            action?()
+        }
     }
 }
 
@@ -1373,7 +1478,7 @@ private final class QuotaDetailPanel: NSPanel {
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -1381,10 +1486,19 @@ private final class QuotaDetailPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         isReleasedWhenClosed = false
+        acceptsMouseMovedEvents = true
+        becomesKeyOnlyIfNeeded = false
+        isFloatingPanel = true
         level = .popUpMenu
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         animationBehavior = .utilityWindow
         hidesOnDeactivate = false
+    }
+
+    override func becomeKey() {
+        super.becomeKey()
+        guard let contentView else { return }
+        invalidateCursorRects(for: contentView)
     }
 }
 
@@ -1396,6 +1510,8 @@ final class QuotaDetailPanelController {
     var isShown: Bool { panel.isVisible }
 
     var window: NSWindow { panel }
+
+    private var activateGeneration = 0
 
     init(model: QuotaModel, refresh: @escaping () -> Void, dismiss: @escaping () -> Void) {
         hostingController = NSHostingController(rootView: QuotaView(
@@ -1427,9 +1543,33 @@ final class QuotaDetailPanelController {
     func show(relativeTo statusView: NSView) {
         position(relativeTo: statusView)
         panel.orderFrontRegardless()
+        scheduleActivate()
+    }
+
+    func scheduleActivate() {
+        activateGeneration += 1
+        let generation = activateGeneration
+        for delay in [0.0, 0.05, 0.12] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.activateNow(generation: generation)
+            }
+        }
+    }
+
+    private func activateNow(generation: Int) {
+        guard activateGeneration == generation, panel.isVisible else { return }
+        if !panel.isKeyWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
+        if let contentView = panel.contentView {
+            panel.invalidateCursorRects(for: contentView)
+        }
     }
 
     func close() {
+        activateGeneration += 1
+        NSCursor.arrow.set()
         panel.orderOut(nil)
     }
 
@@ -1464,6 +1604,7 @@ final class QuotaDetailPanelController {
 
 final class QuotaStatusView: NSView {
     var onLeftClick: (() -> Void)?
+    var onLeftMouseUp: (() -> Void)?
     var onRightClick: (() -> Void)?
 
     private enum Metrics {
@@ -1602,6 +1743,7 @@ final class QuotaStatusView: NSView {
     override func mouseUp(with event: NSEvent) {
         isPressed = false
         needsDisplay = true
+        onLeftMouseUp?()
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -1658,6 +1800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusView = QuotaStatusView(frame: NSRect(x: 0, y: 0, width: 96, height: 22))
         statusView.onLeftClick = { [weak self] in self?.togglePopover() }
+        statusView.onLeftMouseUp = { [weak self] in self?.detailPanel.scheduleActivate() }
         statusView.onRightClick = { [weak self] in self?.showStatusMenu() }
         statusItem.view = statusView
         statusItem.length = statusView.preferredWidth()
