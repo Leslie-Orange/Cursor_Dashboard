@@ -488,7 +488,9 @@ internal static class DetailPainter
         {
             g.DrawString(title, font, brush, panel.X + 62, panel.Y + 16);
         }
-        string reset = QuotaFormatter.ResetAt(snapshot != null && snapshot.Primary != null ? snapshot.Primary.ResetAt : (double?)null);
+        string reset = snapshot != null && !string.IsNullOrEmpty(snapshot.PlanNote)
+            ? snapshot.PlanNote
+            : QuotaFormatter.ResetAt(snapshot != null && snapshot.Primary != null ? snapshot.Primary.ResetAt : (double?)null);
         if (!string.IsNullOrEmpty(reset))
         {
             using (Font font = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
@@ -568,6 +570,10 @@ internal static class DetailPainter
 
         string caption = QuotaFormatter.Caption(window != null ? window.WindowMinutes : (double?)null, window != null ? window.Title : "等待额度数据");
         string reset = QuotaFormatter.Reset(window != null ? window.ResetAt : (double?)null);
+        if (window != null && !window.ResetAt.HasValue && !string.IsNullOrEmpty(window.Schedule))
+        {
+            reset = window.Schedule;
+        }
         string percent = QuotaFormatter.Percent(window != null ? window.Remaining : (double?)null);
         string burn = QuotaFormatter.BurnRatePerDay(
             window != null ? window.Used : (double?)null,
