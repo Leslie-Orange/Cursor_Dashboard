@@ -17,11 +17,13 @@ internal sealed class QuotaWindow
     public string Badge;
     public string Title;
     public string Detail;
+    public string Schedule;
 }
 
 internal sealed class QuotaSnapshot
 {
     public string PlanType;
+    public string PlanNote;
     public QuotaWindow Primary;
     public QuotaWindow Secondary;
     public DateTime SampledAt;
@@ -155,6 +157,231 @@ internal static class JsonValue
             return (date.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
         }
         return null;
+    }
+}
+
+internal static class PlanCatalog
+{
+    public const int Unknown = 0;
+    public const int Weekly = 1;
+    public const int LegacyDual = 2;
+    public const int LegacyCursor = 3;
+    public const int Pooled = 4;
+
+    public static string Key(string planType)
+    {
+        if (string.IsNullOrEmpty(planType))
+        {
+            return "";
+        }
+        return planType.Trim().ToLowerInvariant().Replace("_", "").Replace("-", "").Replace(" ", "");
+    }
+
+    public static int Model(string planType, bool legacyFlag)
+    {
+        string key = Key(planType);
+        if (key.Length == 0)
+        {
+            return Unknown;
+        }
+        if (key == "hobby" || key == "start" || key == "cursorstart")
+        {
+            return LegacyCursor;
+        }
+        if (IsLegacyDualName(key))
+        {
+            return LegacyDual;
+        }
+        if (key == "enterprise")
+        {
+            return Pooled;
+        }
+        if (key == "business")
+        {
+            return LegacyDual;
+        }
+        if (key == "ultra" || key == "team" || key == "teams")
+        {
+            return legacyFlag ? LegacyDual : Weekly;
+        }
+        if (IsWeeklyName(key))
+        {
+            return Weekly;
+        }
+        return Unknown;
+    }
+
+    public static string Display(string planType)
+    {
+        switch (Key(planType))
+        {
+            case "free":
+            case "freetrial":
+                return "Free";
+            case "plus":
+                return "Plus";
+            case "premium":
+                return "Premium";
+            case "super":
+                return "Super";
+            case "ultra":
+            case "ultralegacy":
+            case "legacyultra":
+                return "Ultra";
+            case "hobby":
+                return "Hobby";
+            case "start":
+            case "cursorstart":
+                return "Start";
+            case "pro":
+                return "Pro";
+            case "proplus":
+            case "pro+":
+                return "Pro+";
+            case "business":
+                return "Business";
+            case "enterprise":
+                return "Enterprise";
+            case "team":
+            case "teams":
+                return "Teams";
+            case "teamsstandard":
+            case "teamstandard":
+                return "Teams Standard";
+            case "teamspremium":
+            case "teampremium":
+                return "Teams Premium";
+            default:
+                return null;
+        }
+    }
+
+    public static string Note(string planType, int model)
+    {
+        string key = Key(planType);
+        if (model == Unknown)
+        {
+            return null;
+        }
+        if (key == "plus")
+        {
+            return "基础 · 每周";
+        }
+        if (key == "premium")
+        {
+            return "4× Plus · 每周";
+        }
+        if (key == "super")
+        {
+            return "15× Plus · 每周";
+        }
+        if (key == "ultra" && model == Weekly)
+        {
+            return "50× Plus · 每周";
+        }
+        if (key == "free" || key == "freetrial" || key == "hobby")
+        {
+            return "有限";
+        }
+        if (key == "start" || key == "cursorstart")
+        {
+            return "仅内置 · 每月";
+        }
+        if (key == "teamspremium" || key == "teampremium")
+        {
+            return "5× Standard · 每月";
+        }
+        if (key == "team" || key == "teams")
+        {
+            return model == Weekly ? "按席位 · 每周" : "月度双池";
+        }
+        if (key == "enterprise")
+        {
+            return "共享池";
+        }
+        if (model == LegacyDual || model == LegacyCursor)
+        {
+            return model == LegacyCursor ? "仅内置 · 每月" : "月度双池";
+        }
+        return null;
+    }
+
+    public static string Allowance(string planType, int model)
+    {
+        string key = Key(planType);
+        if (model != Weekly)
+        {
+            return null;
+        }
+        if (key == "plus")
+        {
+            return "基础";
+        }
+        if (key == "premium")
+        {
+            return "4× Plus";
+        }
+        if (key == "super")
+        {
+            return "15× Plus";
+        }
+        if (key == "ultra")
+        {
+            return "50× Plus";
+        }
+        if (key == "team" || key == "teams")
+        {
+            return "按席位";
+        }
+        if (key == "free" || key == "freetrial")
+        {
+            return "有限";
+        }
+        return null;
+    }
+
+    public static bool IncludesOtherPool(int model)
+    {
+        return model == Unknown || model == LegacyDual;
+    }
+
+    public static bool ThirdPartyPrepaid(string planType, int model)
+    {
+        if (model == Pooled)
+        {
+            return true;
+        }
+        if (model != Weekly)
+        {
+            return false;
+        }
+        string key = Key(planType);
+        return key != "plus" && key != "free" && key != "freetrial";
+    }
+
+    private static bool IsLegacyDualName(string key)
+    {
+        return key == "pro"
+            || key == "proplus"
+            || key == "pro+"
+            || key == "teamsstandard"
+            || key == "teamstandard"
+            || key == "teamspremium"
+            || key == "teampremium"
+            || key == "ultralegacy"
+            || key == "legacyultra";
+    }
+
+    private static bool IsWeeklyName(string key)
+    {
+        return key == "free"
+            || key == "freetrial"
+            || key == "plus"
+            || key == "premium"
+            || key == "super"
+            || key == "ultra"
+            || key == "team"
+            || key == "teams";
     }
 }
 
@@ -298,8 +525,9 @@ internal static class QuotaParser
             planType = localPlan;
         }
 
-        // Each model pool has its own limit. The legacy monetary allowance can
-        // be exhausted while the Cursor Models pool still has usage remaining.
+        // Included usage follows the plan. Current X Subscription plans have one
+        // weekly Cursor-model pool. Legacy Pro / Pro+ / Ultra keep two monthly pools.
+        // A monetary allowance is only a fallback when the pool percent is absent.
         bool quotaIsAllowance = !autoUsed.HasValue && allowanceRemaining.HasValue;
         double? primaryRemaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
         double? primaryUsed = quotaIsAllowance
@@ -310,35 +538,177 @@ internal static class QuotaParser
             return null;
         }
 
+        bool legacyFlag = LegacyFlag(summary, planInfo, stripe);
+        int planModel = PlanCatalog.Model(planType, legacyFlag);
+        string planKey = PlanCatalog.Key(planType);
         QuotaSnapshot snapshot = new QuotaSnapshot();
         snapshot.PlanType = planType;
+        snapshot.PlanNote = PlanCatalog.Note(planType, planModel);
         snapshot.SampledAt = sampledAt;
         snapshot.SourceName = sourceName;
         snapshot.Primary = new QuotaWindow();
         snapshot.Primary.Remaining = primaryRemaining;
         snapshot.Primary.Used = primaryUsed;
-        snapshot.Primary.ResetAt = cycleEnd;
-        snapshot.Primary.WindowMinutes = windowMinutes;
-        snapshot.Primary.Badge = quotaIsAllowance ? "额度" : "内置";
-        snapshot.Primary.Title = quotaIsAllowance ? "套餐剩余" : "内置模型剩余";
         snapshot.Primary.Detail = quotaIsAllowance ? AllowanceDetail(includedSpend, centsRemaining, centsLimit) : null;
+        if (quotaIsAllowance)
+        {
+            snapshot.Primary.Badge = "额度";
+            snapshot.Primary.Title = "套餐剩余";
+        }
+        else if (planModel == PlanCatalog.Weekly && (planKey == "free" || planKey == "freetrial"))
+        {
+            snapshot.Primary.Badge = "有限";
+            snapshot.Primary.Title = "有限额度";
+        }
+        else if (planModel == PlanCatalog.Weekly)
+        {
+            snapshot.Primary.Badge = "本周";
+            snapshot.Primary.Title = "Cursor 模型剩余";
+        }
+        else if (planModel == PlanCatalog.Pooled)
+        {
+            snapshot.Primary.Badge = "共享";
+            snapshot.Primary.Title = "共享额度剩余";
+        }
+        else
+        {
+            snapshot.Primary.Badge = "内置";
+            snapshot.Primary.Title = "内置模型剩余";
+        }
+        if (planModel == PlanCatalog.Weekly)
+        {
+            snapshot.Primary.Schedule = (planKey == "free" || planKey == "freetrial") ? "有限额度" : "每周重置";
+            if (!quotaIsAllowance)
+            {
+                snapshot.Primary.Detail = PlanCatalog.Allowance(planType, planModel);
+            }
+        }
+        else
+        {
+            snapshot.Primary.ResetAt = cycleEnd;
+            snapshot.Primary.WindowMinutes = windowMinutes;
+        }
+
         snapshot.Secondary = new QuotaWindow();
-        snapshot.Secondary.ResetAt = cycleEnd;
-        snapshot.Secondary.WindowMinutes = windowMinutes;
-        snapshot.Secondary.Badge = "其他";
-        snapshot.Secondary.Title = "其他模型剩余";
+        if (PlanCatalog.IncludesOtherPool(planModel))
+        {
+            FillIncludedOther(snapshot.Secondary, otherUsed, hasBucket, bucketUsed, bucketLimit, cycleEnd, windowMinutes);
+        }
+        else if (PlanCatalog.ThirdPartyPrepaid(planType, planModel))
+        {
+            FillPrepaid(snapshot.Secondary, PrepaidDetail(summary, dashboard, planInfo));
+        }
+        else
+        {
+            FillExcluded(snapshot.Secondary);
+        }
+        return snapshot;
+    }
+
+    private static void FillIncludedOther(QuotaWindow window, double? otherUsed, bool hasBucket, double bucketUsed, double bucketLimit, double? cycleEnd, double? windowMinutes)
+    {
+        window.ResetAt = cycleEnd;
+        window.WindowMinutes = windowMinutes;
+        window.Badge = "其他";
+        window.Title = "其他模型剩余";
         if (otherUsed.HasValue)
         {
-            snapshot.Secondary.Remaining = Math.Min(100, Math.Max(0, 100 - otherUsed.Value));
-            snapshot.Secondary.Used = otherUsed;
+            window.Remaining = Math.Min(100, Math.Max(0, 100 - otherUsed.Value));
+            window.Used = otherUsed;
         }
         else if (hasBucket && bucketLimit > 0)
         {
             double remaining = Math.Min(100, Math.Max(0, (bucketLimit - bucketUsed) / bucketLimit * 100));
-            snapshot.Secondary.Remaining = remaining;
-            snapshot.Secondary.Used = 100 - remaining;
+            window.Remaining = remaining;
+            window.Used = 100 - remaining;
         }
-        return snapshot;
+    }
+
+    private static void FillExcluded(QuotaWindow window)
+    {
+        window.Badge = "第三方";
+        window.Title = "第三方模型";
+        window.Detail = "不含";
+    }
+
+    private static void FillPrepaid(QuotaWindow window, string detail)
+    {
+        window.Badge = "预付";
+        window.Title = "第三方预付";
+        window.Detail = string.IsNullOrEmpty(detail) ? "按量" : detail;
+        window.Schedule = "用完为止";
+    }
+
+    private static bool LegacyFlag(Dictionary<string, object> summary, Dictionary<string, object> planInfo, Dictionary<string, object> stripe)
+    {
+        if (IsTrue(JsonValue.Get(summary, "isLegacyPlan", "legacyPlan")))
+        {
+            return true;
+        }
+        if (IsTrue(JsonValue.Get(planInfo, "isLegacyPlan", "legacyPlan")))
+        {
+            return true;
+        }
+        if (IsTrue(JsonValue.Get(JsonValue.Nested(planInfo, "planInfo"), "isLegacyPlan", "legacyPlan")))
+        {
+            return true;
+        }
+        if (IsTrue(JsonValue.Get(stripe, "isLegacyPlan", "legacyPlan")))
+        {
+            return true;
+        }
+        string pricing = JsonValue.Text(JsonValue.Get(summary, "pricingModel", "usageAccounting"));
+        if (pricing == null)
+        {
+            pricing = JsonValue.Text(JsonValue.Get(stripe, "pricingModel", "usageAccounting"));
+        }
+        if (pricing == null)
+        {
+            return false;
+        }
+        return pricing.ToLowerInvariant().IndexOf("legacy", StringComparison.Ordinal) >= 0;
+    }
+
+    private static bool IsTrue(object value)
+    {
+        if (value is bool)
+        {
+            return (bool)value;
+        }
+        string text = JsonValue.Text(value);
+        return text != null && string.Equals(text, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string PrepaidDetail(Dictionary<string, object> summary, Dictionary<string, object> dashboard, Dictionary<string, object> planInfo)
+    {
+        double? cents = FirstMoney(
+            JsonValue.Get(summary, "prepaidCreditRemainingCents", "creditBalanceCents"),
+            JsonValue.Get(JsonValue.Nested(summary, "individualUsage"), "prepaidCreditRemainingCents", "creditBalanceCents"),
+            JsonValue.Get(JsonValue.Nested(summary, "prepaid"), "remainingCents", "balanceCents"),
+            JsonValue.Get(dashboard, "prepaidCreditRemainingCents", "creditBalanceCents"),
+            JsonValue.Get(planInfo, "prepaidCreditRemainingCents", "creditBalanceCents"));
+        if (!cents.HasValue)
+        {
+            return null;
+        }
+        return "余额 " + Dollars(Math.Max(0, cents.Value));
+    }
+
+    private static double? FirstMoney(params object[] values)
+    {
+        if (values == null)
+        {
+            return null;
+        }
+        for (int i = 0; i < values.Length; i++)
+        {
+            double? number = JsonValue.Number(values[i]);
+            if (number.HasValue)
+            {
+                return number;
+            }
+        }
+        return null;
     }
 
     private static double? FirstDate(params object[] values)
@@ -524,6 +894,13 @@ internal static class QuotaFormatter
     public static string Line(QuotaWindow window, string fallbackBadge)
     {
         string badge = window != null && !string.IsNullOrEmpty(window.Badge) ? window.Badge : fallbackBadge;
+        if (window == null || !window.Remaining.HasValue)
+        {
+            if (window != null && !string.IsNullOrEmpty(window.Detail))
+            {
+                return badge + " " + window.Detail;
+            }
+        }
         return badge + " " + Percent(window != null ? window.Remaining : (double?)null);
     }
 
@@ -547,16 +924,11 @@ internal static class QuotaFormatter
         {
             return "Cursor 额度";
         }
-        string key = raw.ToLowerInvariant().Replace("_", "");
-        string mapped = raw;
-        if (key == "pro") mapped = "Pro";
-        else if (key == "proplus" || key == "pro+") mapped = "Pro+";
-        else if (key == "ultra") mapped = "Ultra";
-        else if (key == "business") mapped = "Business";
-        else if (key == "enterprise") mapped = "Enterprise";
-        else if (key == "team") mapped = "Team";
-        else if (key == "free" || key == "hobby") mapped = "Free";
-        else mapped = Capitalize(raw);
+        string mapped = PlanCatalog.Display(raw);
+        if (mapped == null)
+        {
+            mapped = Capitalize(raw);
+        }
         return mapped + " 额度";
     }
 
@@ -1512,6 +1884,7 @@ internal static class SnapshotCache
             }
             QuotaSnapshot snapshot = new QuotaSnapshot();
             snapshot.PlanType = JsonValue.Text(JsonValue.Get(map, "planType"));
+            snapshot.PlanNote = JsonValue.Text(JsonValue.Get(map, "planNote"));
             snapshot.SourceName = "cache";
             double? sampled = JsonValue.UnixSeconds(JsonValue.Get(map, "sampledAt"));
             snapshot.SampledAt = sampled.HasValue
@@ -1525,14 +1898,18 @@ internal static class SnapshotCache
                 resetAt,
                 windowMinutes,
                 Remap(JsonValue.Text(JsonValue.Get(map, "primaryBadge")), "内置"),
-                JsonValue.Text(JsonValue.Get(map, "primaryTitle")) ?? "内置模型剩余");
+                JsonValue.Text(JsonValue.Get(map, "primaryTitle")) ?? "内置模型剩余",
+                JsonValue.Text(JsonValue.Get(map, "primaryDetail")),
+                JsonValue.Text(JsonValue.Get(map, "primarySchedule")));
             snapshot.Secondary = Window(
                 JsonValue.Number(JsonValue.Get(map, "secondaryRemain")),
                 JsonValue.Number(JsonValue.Get(map, "secondaryUsed")),
                 resetAt,
                 windowMinutes,
                 Remap(JsonValue.Text(JsonValue.Get(map, "secondaryBadge")), "其他"),
-                JsonValue.Text(JsonValue.Get(map, "secondaryTitle")) ?? "其他模型剩余");
+                JsonValue.Text(JsonValue.Get(map, "secondaryTitle")) ?? "其他模型剩余",
+                JsonValue.Text(JsonValue.Get(map, "secondaryDetail")),
+                JsonValue.Text(JsonValue.Get(map, "secondarySchedule")));
             if (!snapshot.Primary.Remaining.HasValue && !snapshot.Secondary.Remaining.HasValue)
             {
                 return null;
@@ -1560,14 +1937,19 @@ internal static class SnapshotCache
             json.Append("{\n");
             json.Append("  \"quotaFormatVersion\": 2,\n");
             json.Append("  \"planType\": ").Append(JsonString(snapshot.PlanType)).Append(",\n");
+            json.Append("  \"planNote\": ").Append(JsonString(snapshot.PlanNote)).Append(",\n");
             json.Append("  \"totalRemain\": ").Append(JsonNumber(snapshot.Primary.Remaining)).Append(",\n");
             json.Append("  \"totalUsed\": ").Append(JsonNumber(snapshot.Primary.Used)).Append(",\n");
             json.Append("  \"primaryBadge\": ").Append(JsonString(snapshot.Primary.Badge)).Append(",\n");
             json.Append("  \"primaryTitle\": ").Append(JsonString(snapshot.Primary.Title)).Append(",\n");
+            json.Append("  \"primaryDetail\": ").Append(JsonString(snapshot.Primary.Detail)).Append(",\n");
+            json.Append("  \"primarySchedule\": ").Append(JsonString(snapshot.Primary.Schedule)).Append(",\n");
             json.Append("  \"secondaryRemain\": ").Append(JsonNumber(snapshot.Secondary.Remaining)).Append(",\n");
             json.Append("  \"secondaryUsed\": ").Append(JsonNumber(snapshot.Secondary.Used)).Append(",\n");
             json.Append("  \"secondaryBadge\": ").Append(JsonString(snapshot.Secondary.Badge)).Append(",\n");
             json.Append("  \"secondaryTitle\": ").Append(JsonString(snapshot.Secondary.Title)).Append(",\n");
+            json.Append("  \"secondaryDetail\": ").Append(JsonString(snapshot.Secondary.Detail)).Append(",\n");
+            json.Append("  \"secondarySchedule\": ").Append(JsonString(snapshot.Secondary.Schedule)).Append(",\n");
             json.Append("  \"resetAt\": ").Append(JsonNumber(snapshot.Primary.ResetAt)).Append(",\n");
             json.Append("  \"windowMinutes\": ").Append(JsonNumber(snapshot.Primary.WindowMinutes)).Append(",\n");
             json.Append("  \"sampledAt\": ").Append(JsonNumber(sampled)).Append("\n");
@@ -1579,7 +1961,7 @@ internal static class SnapshotCache
         }
     }
 
-    private static QuotaWindow Window(double? remaining, double? used, double? resetAt, double? windowMinutes, string badge, string title)
+    private static QuotaWindow Window(double? remaining, double? used, double? resetAt, double? windowMinutes, string badge, string title, string detail, string schedule)
     {
         QuotaWindow window = new QuotaWindow();
         window.Remaining = remaining;
@@ -1588,6 +1970,8 @@ internal static class SnapshotCache
         window.WindowMinutes = windowMinutes;
         window.Badge = badge;
         window.Title = title;
+        window.Detail = detail;
+        window.Schedule = schedule;
         return window;
     }
 
