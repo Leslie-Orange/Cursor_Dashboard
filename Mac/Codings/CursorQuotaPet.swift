@@ -12,6 +12,24 @@ struct QuotaWindow {
     let badge: String
     let title: String
     let detail: String?
+    let remainingAmountCents: Double?
+    let limitAmountCents: Double?
+    let currencyCode: String?
+
+    init(remaining: Double?, used: Double?, resetAt: TimeInterval?, windowMinutes: Double?,
+         badge: String, title: String, detail: String?, remainingAmountCents: Double? = nil,
+         limitAmountCents: Double? = nil, currencyCode: String? = nil) {
+        self.remaining = remaining
+        self.used = used
+        self.resetAt = resetAt
+        self.windowMinutes = windowMinutes
+        self.badge = badge
+        self.title = title
+        self.detail = detail
+        self.remainingAmountCents = remainingAmountCents
+        self.limitAmountCents = limitAmountCents
+        self.currencyCode = currencyCode
+    }
 }
 
 struct QuotaSnapshot {
@@ -98,7 +116,9 @@ enum QuotaParser {
         stripe: [String: Any]?,
         localPlan: String?,
         sampledAt: Date,
-        sourceName: String
+        sourceName: String,
+        creditBalance: [String: Any]? = nil,
+        prepaidBilling: [String: Any]? = nil
     ) -> QuotaSnapshot? {
         let planUsage = JSONValue.dictionary(JSONValue.value(dashboard, names: ["planUsage"]))
             ?? JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "plan"]))
@@ -169,9 +189,17 @@ enum QuotaParser {
         if cycleEnd == nil, let cycleStart {
             cycleEnd = cycleStart.addingTimeInterval(30 * 24 * 60 * 60)
         }
-        let resetAt = cycleEnd?.timeIntervalSince1970
+        let plan = JSONValue.dictionary(planInfo?["planInfo"]) ?? planInfo
+        let periodValue = plan?["includedUsagePeriod"]
+        let periodName = JSONValue.string(periodValue)?.uppercased() ?? ""
+        let isWeekly = JSONValue.number(periodValue) == 2 || periodName.contains("WEEKLY")
+        let includedReset = JSONValue.date(plan?["includedUsageResetsAt"])
+        let resetAt = isWeekly ? includedReset?.timeIntervalSince1970
+            : (includedReset ?? cycleEnd)?.timeIntervalSince1970
         let windowMinutes: Double?
-        if let cycleStart, let cycleEnd {
+        if isWeekly {
+            windowMinutes = 7 * 24 * 60
+        } else if let cycleStart, let cycleEnd {
             windowMinutes = max(1, cycleEnd.timeIntervalSince(cycleStart) / 60)
         } else {
             windowMinutes = 30 * 24 * 60
@@ -187,9 +215,10 @@ enum QuotaParser {
         let onDemandEnabled = onDemand?["enabled"] as? Bool ?? false
         let onDemandUsed = JSONValue.number(JSONValue.value(onDemand, names: ["used"]))
 
+        let amounts = extraAmounts(creditBalance: creditBalance, prepaidBilling: prepaidBilling)
         let quotaIsAllowance = allowance != nil
         let primaryRemaining = allowance?.remaining ?? builtinRemaining
-        guard primaryRemaining != nil || otherUsedPercent != nil || requestBucket != nil else {
+        guard primaryRemaining != nil || otherUsedPercent != nil || requestBucket != nil || amounts != nil else {
             return nil
         }
 
@@ -216,13 +245,32 @@ enum QuotaParser {
             used: allowance?.used ?? builtinUsedPercent ?? builtinRemaining.map { 100 - $0 },
             resetAt: resetAt,
             windowMinutes: windowMinutes,
-            badge: quotaIsAllowance ? "额度" : "内置",
-            title: quotaIsAllowance ? "套餐剩余" : "内置模型剩余",
-            detail: totalDetail
+            badge: isWeekly ? "内置" : (quotaIsAllowance ? "额度" : "内置"),
+            title: isWeekly ? "周限额" : (quotaIsAllowance ? "套餐剩余" : "内置模型剩余"),
+            detail: isWeekly ? (primaryRemaining.map { percentDetail(used: 100 - $0, label: "已用") }) : totalDetail
         )
 
         let secondary: QuotaWindow
-        if let otherUsedPercent {
+        if let amounts {
+            let remainingPercent = amounts.total.flatMap { total in
+                guard total > 0, let remaining = amounts.remaining else { return nil as Double? }
+                return clampPercent(remaining / total * 100)
+            }
+            secondary = QuotaWindow(
+                remaining: remainingPercent,
+                used: remainingPercent.map { 100 - $0 },
+                resetAt: nil, windowMinutes: nil,
+                badge: "其他", title: "额外额度池",
+                detail: amounts.used.map { String(format: "已用 $%.2f", $0 / 100) },
+                remainingAmountCents: amounts.remaining,
+                limitAmountCents: amounts.total, currencyCode: "USD"
+            )
+        } else if isWeekly {
+            secondary = QuotaWindow(
+                remaining: nil, used: nil, resetAt: nil, windowMinutes: nil,
+                badge: "其他", title: "额外额度池", detail: "金额暂不可用"
+            )
+        } else if let otherUsedPercent {
             secondary = QuotaWindow(
                 remaining: min(100, max(0, 100 - otherUsedPercent)),
                 used: otherUsedPercent,
@@ -230,7 +278,10 @@ enum QuotaParser {
                 windowMinutes: windowMinutes,
                 badge: "其他",
                 title: "其他模型剩余",
-                detail: percentDetail(used: otherUsedPercent, label: "已用")
+                detail: percentDetail(used: otherUsedPercent, label: "已用"),
+                remainingAmountCents: legacyOtherRemaining(planUsage, summaryPlan),
+                limitAmountCents: JSONValue.number(planUsage?["apiLimit"]) ?? JSONValue.number(summaryPlan?["apiLimit"]),
+                currencyCode: "USD"
             )
         } else if let bucket = requestBucket, bucket.limit > 0 {
             let remaining = min(100, max(0, (bucket.limit - bucket.used) / bucket.limit * 100))
@@ -262,6 +313,35 @@ enum QuotaParser {
             sampledAt: sampledAt,
             sourceName: sourceName
         )
+    }
+
+    private static func extraAmounts(
+        creditBalance: [String: Any]?, prepaidBilling: [String: Any]?
+    ) -> (remaining: Double?, total: Double?, used: Double?)? {
+        func amount(_ object: [String: Any]?, _ key: String) -> Double? {
+            guard let value = JSONValue.number(object?[key]), value.isFinite else { return nil }
+            return value
+        }
+        let grantTotal = amount(creditBalance, "totalCents")
+        let grantRemaining = amount(creditBalance, "creditBalanceCents")
+        let hasGrants = creditBalance?["hasCreditGrants"] as? Bool == true
+            || (grantTotal ?? 0) > 0
+        if hasGrants, grantRemaining != nil || grantTotal != nil {
+            return (grantRemaining, grantTotal, amount(creditBalance, "usedCents"))
+        }
+        let available = amount(prepaidBilling, "availableCents")
+        let funded = amount(prepaidBilling, "fundedCents")
+        if available != nil || funded != nil {
+            return (available, funded, amount(prepaidBilling, "spentCents"))
+        }
+        return nil
+    }
+
+    private static func legacyOtherRemaining(_ plan: [String: Any]?, _ summary: [String: Any]?) -> Double? {
+        let total = JSONValue.number(plan?["apiLimit"]) ?? JSONValue.number(summary?["apiLimit"])
+        let spent = JSONValue.number(plan?["apiSpend"]) ?? JSONValue.number(summary?["apiSpend"])
+        guard let total, let spent, total.isFinite, spent.isFinite else { return nil }
+        return total - spent
     }
 
     private static func firstDate(_ values: [Any?]) -> Date? {
@@ -552,8 +632,12 @@ enum SnapshotCache {
     }
 
     static func load() -> QuotaSnapshot? {
-        guard let data = try? Data(contentsOf: url()),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let data = try? Data(contentsOf: url()) else { return nil }
+        return decode(data)
+    }
+
+    static func decode(_ data: Data) -> QuotaSnapshot? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
         let sampledAt = JSONValue.date(object["sampledAt"]) ?? .distantPast
@@ -571,13 +655,17 @@ enum SnapshotCache {
         let secondary = QuotaWindow(
             remaining: JSONValue.number(object["secondaryRemain"]),
             used: JSONValue.number(object["secondaryUsed"]),
-            resetAt: resetAt,
-            windowMinutes: windowMinutes,
+            resetAt: object.keys.contains("secondaryResetAt") ? JSONValue.number(object["secondaryResetAt"]) : resetAt,
+            windowMinutes: object.keys.contains("secondaryWindowMinutes") ? JSONValue.number(object["secondaryWindowMinutes"]) : windowMinutes,
             badge: remappedBadge(JSONValue.string(object["secondaryBadge"]), fallback: "其他"),
             title: JSONValue.string(object["secondaryTitle"]) ?? "其他模型剩余",
-            detail: JSONValue.string(object["secondaryDetail"])
+            detail: JSONValue.string(object["secondaryDetail"]),
+            remainingAmountCents: JSONValue.number(object["secondaryRemainingAmountCents"]),
+            limitAmountCents: JSONValue.number(object["secondaryLimitAmountCents"]),
+            currencyCode: JSONValue.string(object["secondaryCurrencyCode"])
         )
-        guard primary.remaining != nil || secondary.remaining != nil else { return nil }
+        guard primary.remaining != nil || secondary.remaining != nil
+            || secondary.remainingAmountCents != nil || secondary.limitAmountCents != nil else { return nil }
         return QuotaSnapshot(
             planType: JSONValue.string(object["planType"]),
             primary: primary,
@@ -587,7 +675,7 @@ enum SnapshotCache {
         )
     }
 
-    static func save(_ snapshot: QuotaSnapshot) {
+    static func encode(_ snapshot: QuotaSnapshot) -> Data? {
         let object: [String: Any] = [
             "planType": snapshot.planType as Any,
             "totalRemain": snapshot.primary.remaining as Any,
@@ -600,12 +688,21 @@ enum SnapshotCache {
             "secondaryBadge": snapshot.secondary.badge,
             "secondaryTitle": snapshot.secondary.title,
             "secondaryDetail": snapshot.secondary.detail as Any,
+            "secondaryRemainingAmountCents": snapshot.secondary.remainingAmountCents as Any,
+            "secondaryLimitAmountCents": snapshot.secondary.limitAmountCents as Any,
+            "secondaryCurrencyCode": snapshot.secondary.currencyCode as Any,
+            "secondaryResetAt": snapshot.secondary.resetAt.map { NSNumber(value: $0) } ?? NSNull(),
+            "secondaryWindowMinutes": snapshot.secondary.windowMinutes.map { NSNumber(value: $0) } ?? NSNull(),
             "resetAt": snapshot.primary.resetAt as Any,
             "windowMinutes": snapshot.primary.windowMinutes as Any,
             "sampledAt": ISO8601DateFormatter().string(from: snapshot.sampledAt),
             "sourceName": snapshot.sourceName
         ]
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]) else { return }
+        return try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted])
+    }
+
+    static func save(_ snapshot: QuotaSnapshot) {
+        guard let data = encode(snapshot) else { return }
         let file = url()
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: file, options: .atomic)
@@ -658,6 +755,8 @@ final class CursorUsageClient {
         var summary: [String: Any]?
         var authUsage: [String: Any]?
         var stripe: [String: Any]?
+        var creditBalance: [String: Any]?
+        var prepaidBilling: [String: Any]?
         var errors: [String] = []
 
         fetch(
@@ -721,6 +820,17 @@ final class CursorUsageClient {
             if let error { errors.append(error) }
         }
 
+        fetch(
+            group: group, method: "POST",
+            url: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance",
+            bearer: bearer, cookie: nil, connectRPC: true, body: [:]
+        ) { json, _ in creditBalance = json }
+        fetch(
+            group: group, method: "POST",
+            url: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling",
+            bearer: bearer, cookie: nil, connectRPC: true, body: [:]
+        ) { json, _ in prepaidBilling = json }
+
         _ = group.wait(timeout: .now() + 18)
 
         if let snapshot = QuotaParser.snapshot(
@@ -731,7 +841,9 @@ final class CursorUsageClient {
             stripe: stripe,
             localPlan: session.localPlan,
             sampledAt: Date(),
-            sourceName: "cursor-api"
+            sourceName: "cursor-api",
+            creditBalance: creditBalance,
+            prepaidBilling: prepaidBilling
         ) {
             lastError = ""
             SnapshotCache.save(snapshot)
@@ -908,6 +1020,35 @@ enum QuotaFormatter {
     }
 }
 
+enum PreviewScenario: String, CaseIterable {
+    case normal, warning, critical, empty, snapshot, error
+
+    func sample(at now: Date = Date()) -> QuotaSnapshot? {
+        guard self != .empty else { return nil }
+        let values: (Double, Double)
+        switch self {
+        case .warning: values = (30, 10)
+        case .critical: values = (0, 0)
+        default: values = (76, 45)
+        }
+        let reset = now.addingTimeInterval(3 * 86400 + 9 * 3600).timeIntervalSince1970
+        let cached = self == .snapshot || self == .error
+        return QuotaSnapshot(
+            planType: "premium",
+            primary: QuotaWindow(remaining: values.0, used: 100 - values.0, resetAt: reset,
+                                 windowMinutes: 10080, badge: "内置", title: "内置模型剩余",
+                                 detail: "已用 \(Int(100 - values.0))%"),
+            secondary: QuotaWindow(remaining: values.1, used: 100 - values.1, resetAt: nil,
+                                   windowMinutes: nil, badge: "额外", title: "额外额度池",
+                                   detail: String(format: "已用 $%.2f", (100 - values.1) / 5),
+                                   remainingAmountCents: values.1 * 20,
+                                   limitAmountCents: 2000, currencyCode: "USD"),
+            sampledAt: cached ? now.addingTimeInterval(-2700) : now,
+            sourceName: cached ? "cache" : "cursor-api"
+        )
+    }
+}
+
 @MainActor
 final class QuotaModel: ObservableObject {
     @Published private(set) var snapshot: QuotaSnapshot?
@@ -916,13 +1057,15 @@ final class QuotaModel: ObservableObject {
     @Published private(set) var footer = "正在读取 Cursor 登录态…"
 
     private let client = CursorUsageClient()
+    private let previewScenario: PreviewScenario?
     private let uiSeconds: TimeInterval
     private let fetchSeconds: TimeInterval
     private var uiTimer: Timer?
     private var fetchTimer: Timer?
     private var lastFetch = Date.distantPast
 
-    init(uiSeconds: TimeInterval = 1, fetchSeconds: TimeInterval = 30) {
+    init(uiSeconds: TimeInterval = 1, fetchSeconds: TimeInterval = 30, previewScenario: PreviewScenario? = nil) {
+        self.previewScenario = previewScenario
         self.uiSeconds = uiSeconds
         self.fetchSeconds = fetchSeconds
         client.onSnapshot = { [weak self] snapshot in
@@ -938,6 +1081,13 @@ final class QuotaModel: ObservableObject {
     }
 
     func start() {
+        if previewScenario != nil {
+            refreshPreview()
+            uiTimer = Timer.scheduledTimer(withTimeInterval: uiSeconds, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.tick() }
+            }
+            return
+        }
         fallbackSnapshot = SnapshotCache.load()
         refresh(forceNetwork: true)
         uiTimer = Timer.scheduledTimer(withTimeInterval: uiSeconds, repeats: true) { [weak self] _ in
@@ -949,6 +1099,10 @@ final class QuotaModel: ObservableObject {
     }
 
     func refresh(forceNetwork: Bool = true) {
+        if previewScenario != nil {
+            refreshPreview()
+            return
+        }
         fallbackSnapshot = SnapshotCache.load()
         if forceNetwork || Date().timeIntervalSince(lastFetch) >= fetchSeconds {
             lastFetch = Date()
@@ -961,6 +1115,25 @@ final class QuotaModel: ObservableObject {
             footer = connectionError
         } else {
             footer = "正在读取 Cursor 登录态…"
+        }
+    }
+
+    private func refreshPreview() {
+        guard let previewScenario else { return }
+        let sample = previewScenario.sample()
+        if previewScenario == .snapshot || previewScenario == .error {
+            snapshot = nil
+            fallbackSnapshot = sample
+        } else {
+            snapshot = sample
+            fallbackSnapshot = nil
+        }
+        connectionError = previewScenario == .error
+            ? "网络不可用，正在显示上次成功数据。请检查网络后重试。" : ""
+        if let sample {
+            updateFooter(sample)
+        } else {
+            footer = "等待额度数据 · 离线预览"
         }
     }
 
@@ -984,490 +1157,7 @@ final class QuotaModel: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm"
         let stale = ageMinutes >= 10 ? " · 可能过期" : ""
-        let shortError = QuotaFormatter.shortError(connectionError)
-        let error = value.sourceName == "cursor-api" || shortError.isEmpty ? "" : " · \(shortError)"
-        footer = "更新于 \(formatter.string(from: value.sampledAt))\(stale)\(error)"
-    }
-}
-
-private enum GlassTheme {
-    static let mint = Color(red: 22 / 255, green: 148 / 255, blue: 108 / 255)
-    static let slateMuted = Color.secondary
-    static let warning = Color(red: 0.96, green: 0.60, blue: 0.06)
-    static let danger = Color(red: 0.94, green: 0.29, blue: 0.30)
-    static let panelWidth: CGFloat = 386
-    static let panelHeight: CGFloat = 280
-    static let panelRadius: CGFloat = 30
-    static let panelInset: CGFloat = 14
-    static let cardRadius: CGFloat = panelRadius - panelInset
-    static let shadowPadding: CGFloat = 18
-    static var windowWidth: CGFloat { panelWidth + shadowPadding * 2 }
-    static var windowHeight: CGFloat { panelHeight + shadowPadding * 2 }
-
-    static var panelShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
-    }
-
-    static var cardShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
-    }
-
-    static func emphasis(remaining: Double?) -> Color {
-        guard let remaining else { return slateMuted.opacity(0.7) }
-        if remaining <= 10 { return danger }
-        if remaining <= 30 { return warning }
-        return mint
-    }
-}
-
-private final class MaskedGlassView: NSVisualEffectView {
-    var cornerRadius: CGFloat = GlassTheme.panelRadius {
-        didSet { applyMask() }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        applyMask()
-    }
-
-    override func layout() {
-        super.layout()
-        applyMask()
-    }
-
-    private func applyMask() {
-        wantsLayer = true
-        layer?.cornerRadius = cornerRadius
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-        layer?.borderWidth = 0
-    }
-}
-
-private struct VisualBlur: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .hudWindow
-    var cornerRadius: CGFloat = GlassTheme.panelRadius
-
-    func makeNSView(context: Context) -> MaskedGlassView {
-        let view = MaskedGlassView()
-        view.material = material
-        view.blendingMode = .behindWindow
-        view.state = .active
-        view.isEmphasized = true
-        view.cornerRadius = cornerRadius
-        return view
-    }
-
-    func updateNSView(_ nsView: MaskedGlassView, context: Context) {
-        nsView.material = material
-        nsView.state = .active
-        nsView.cornerRadius = cornerRadius
-    }
-}
-
-private struct GlassPanel<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    @ViewBuilder
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            modernBody
-        } else {
-            legacyBody
-        }
-    }
-
-    @available(macOS 26.0, *)
-    private var modernBody: some View {
-        content
-            .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
-            .glassEffect(.regular, in: GlassTheme.panelShape)
-            .containerShape(GlassTheme.panelShape)
-    }
-
-    private var legacyBody: some View {
-        content
-            .background {
-                VisualBlur(material: .hudWindow, cornerRadius: GlassTheme.panelRadius)
-                    .clipShape(GlassTheme.panelShape)
-            }
-            .clipShape(GlassTheme.panelShape)
-            .containerShape(GlassTheme.panelShape)
-            .overlay {
-                GlassTheme.panelShape.strokeBorder(.primary.opacity(0.12), lineWidth: 0.5)
-            }
-            .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 10)
-    }
-}
-
-private struct GlassInsetCard<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    @ViewBuilder
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            content
-                .background(
-                    .fill.quaternary,
-                    in: ConcentricRectangle(corners: .concentric(minimum: 12), isUniform: true)
-                )
-        } else {
-            content
-                .background(GlassTheme.cardShape.fill(.primary.opacity(0.06)))
-                .clipShape(GlassTheme.cardShape)
-                .overlay {
-                    GlassTheme.cardShape.strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
-                }
-        }
-    }
-}
-
-private struct GlassControlGroup<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    @ViewBuilder
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) { content }
-            }
-        } else {
-            HStack(spacing: 8) { content }
-        }
-    }
-}
-
-private struct GlassIconButton: View {
-    let systemName: String
-    let accessibilityLabel: String
-    let action: () -> Void
-
-    private let size: CGFloat = 28
-
-    var body: some View {
-        Image(systemName: systemName)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .frame(width: size, height: size)
-            .modifier(GlassCircleBackground())
-            .overlay {
-                PointingHandHitArea(toolTip: accessibilityLabel, action: action)
-                    .frame(width: size, height: size)
-            }
-            .accessibilityLabel(accessibilityLabel)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction(.default, action)
-            .help(accessibilityLabel)
-    }
-}
-
-private struct PointingHandHitArea: NSViewRepresentable {
-    let toolTip: String
-    let action: () -> Void
-
-    func makeNSView(context: Context) -> PointingHandHitView {
-        let view = PointingHandHitView()
-        view.setAccessibilityElement(false)
-        view.toolTip = toolTip
-        view.action = action
-        return view
-    }
-
-    func updateNSView(_ view: PointingHandHitView, context: Context) {
-        view.toolTip = toolTip
-        view.action = action
-    }
-}
-
-private final class PointingHandHitView: NSView {
-    var action: (() -> Void)?
-    private var installedTrackingAreas: [NSTrackingArea] = []
-
-    override var acceptsFirstResponder: Bool { false }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        containsLocalPoint(convert(point, from: superview)) ? self : nil
-    }
-
-    private func containsLocalPoint(_ point: NSPoint) -> Bool {
-        guard bounds.contains(point) else { return false }
-        let dx = point.x - bounds.midX
-        let dy = point.y - bounds.midY
-        let radius = min(bounds.width, bounds.height) / 2
-        return dx * dx + dy * dy <= radius * radius
-    }
-
-    override func resetCursorRects() {
-        discardCursorRects()
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        installedTrackingAreas.forEach(removeTrackingArea)
-        let optionSets: [NSTrackingArea.Options] = [
-            [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
-            [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeInActiveApp, .inVisibleRect]
-        ]
-        installedTrackingAreas = optionSets.map { options in
-            let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
-            addTrackingArea(area)
-            return area
-        }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        updateTrackingAreas()
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        NSCursor.pointingHand.set()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        NSCursor.pointingHand.set()
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        NSCursor.pointingHand.set()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        if !containsLocalPoint(local) {
-            NSCursor.arrow.set()
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard let window else { return }
-        NSCursor.pointingHand.set()
-        var inside = true
-        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
-            inside = containsLocalPoint(convert(next.locationInWindow, from: nil))
-            if next.type == .leftMouseUp { break }
-        }
-        guard inside else { return }
-        let action = action
-        DispatchQueue.main.async {
-            action?()
-        }
-    }
-}
-
-private struct GlassCircleBackground: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular.interactive(), in: Circle())
-        } else {
-            content.background(.primary.opacity(0.08), in: Circle())
-        }
-    }
-}
-
-private struct QuotaStatusLabel: View {
-    let title: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(tint)
-                .frame(width: 6, height: 6)
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct QuotaRing: View {
-    let label: String
-    let progress: CGFloat
-    let tint: Color
-
-    private let size: CGFloat = 50
-    private let lineWidth: CGFloat = 5.5
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(.quaternary, lineWidth: lineWidth)
-
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .scaleEffect(x: -1, y: 1)
-
-            Text(label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
-        }
-        .frame(width: size, height: size)
-        .animation(.easeOut(duration: 0.4), value: progress)
-    }
-}
-
-private struct QuotaCard: View {
-    let window: QuotaWindow
-
-    private var tint: Color {
-        GlassTheme.emphasis(remaining: window.remaining)
-    }
-
-    private var progress: CGFloat {
-        CGFloat(min(100, max(0, window.remaining ?? 0)) / 100)
-    }
-
-    var body: some View {
-        HStack(spacing: 13) {
-            QuotaRing(label: window.badge, progress: progress, tint: tint)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: window.title))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(QuotaFormatter.reset(window.resetAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(QuotaFormatter.percent(window.remaining))
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
-                    .foregroundStyle(tint)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                Text(
-                    window.detail ?? QuotaFormatter.burnRatePerDay(
-                        used: window.used,
-                        remaining: window.remaining,
-                        resetAt: window.resetAt,
-                        windowMinutes: window.windowMinutes
-                    )
-                )
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .monospacedDigit()
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
-}
-
-struct QuotaView: View {
-    @ObservedObject var model: QuotaModel
-    let refresh: () -> Void
-    let dismiss: () -> Void
-
-    private let placeholder = QuotaWindow(
-        remaining: nil,
-        used: nil,
-        resetAt: nil,
-        windowMinutes: nil,
-        badge: "—",
-        title: "等待额度数据",
-        detail: nil
-    )
-
-    private var currentSnapshot: QuotaSnapshot? {
-        model.snapshot ?? model.fallbackSnapshot
-    }
-
-    private var statusTint: Color {
-        currentSnapshot?.sourceName == "cursor-api"
-            ? GlassTheme.mint
-            : GlassTheme.warning
-    }
-
-    private var statusBadge: String {
-        guard let currentSnapshot else { return "等待" }
-        return currentSnapshot.sourceName == "cursor-api" ? "实时" : "快照"
-    }
-
-    var body: some View {
-        GlassPanel {
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(QuotaFormatter.planTitle(currentSnapshot?.planType))
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-
-                        Text(
-                            QuotaFormatter.resetAt(
-                                currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
-                            ) ?? "重置时间未知"
-                        )
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .monospacedDigit()
-                    }
-
-                    Spacer(minLength: 6)
-
-                    GlassControlGroup {
-                        GlassIconButton(systemName: "arrow.clockwise", accessibilityLabel: "刷新额度", action: refresh)
-                        GlassIconButton(systemName: "xmark", accessibilityLabel: "关闭详情", action: dismiss)
-                    }
-                }
-                .padding(.leading, 20)
-                .padding(.trailing, 16)
-                .padding(.top, 16)
-                .padding(.bottom, 12)
-
-                GlassInsetCard {
-                    VStack(spacing: 0) {
-                        QuotaCard(window: currentSnapshot?.primary ?? placeholder)
-                        Divider()
-                            .padding(.leading, 77)
-                            .padding(.trailing, 14)
-                        QuotaCard(window: currentSnapshot?.secondary ?? placeholder)
-                    }
-                }
-                .padding(.horizontal, GlassTheme.panelInset)
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 8) {
-                    Text(model.footer)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .monospacedDigit()
-                    Spacer(minLength: 5)
-                    QuotaStatusLabel(title: statusBadge, tint: statusTint)
-                }
-                .padding(.leading, 20)
-                .padding(.trailing, 16)
-                .padding(.bottom, 14)
-            }
-            .frame(width: GlassTheme.panelWidth, height: GlassTheme.panelHeight)
-        }
-        .padding(GlassTheme.shadowPadding)
+        footer = "更新于 \(formatter.string(from: value.sampledAt))\(stale)"
     }
 }
 
@@ -1529,7 +1219,7 @@ final class QuotaDetailPanelController {
                 x: 0,
                 y: 0,
                 width: GlassTheme.windowWidth,
-                height: GlassTheme.windowHeight
+                height: 360
             )
         )
         panel.contentViewController = hostingController
@@ -1537,10 +1227,30 @@ final class QuotaDetailPanelController {
         panel.contentView?.layer?.isOpaque = false
         panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView?.layer?.masksToBounds = false
-        panel.setContentSize(NSSize(width: GlassTheme.windowWidth, height: GlassTheme.windowHeight))
+        panel.title = "Cursor 额度详情"
+        panel.setAccessibilityLabel("Cursor 额度详情")
+        resizeToContent()
+    }
+
+    private func resizeToContent() {
+        hostingController.view.invalidateIntrinsicContentSize()
+        hostingController.view.layoutSubtreeIfNeeded()
+        let measured = hostingController.view.fittingSize
+        let height = max(300, ceil(measured.height))
+        guard height.isFinite, height < 1200 else { return }
+        if abs(panel.frame.height - height) > 0.5 {
+            panel.setContentSize(NSSize(width: GlassTheme.windowWidth, height: height))
+        }
+    }
+
+    func refreshLayout(relativeTo statusView: NSView) {
+        guard isShown else { return }
+        resizeToContent()
+        position(relativeTo: statusView)
     }
 
     func show(relativeTo statusView: NSView) {
+        resizeToContent()
         position(relativeTo: statusView)
         panel.orderFrontRegardless()
         scheduleActivate()
@@ -1584,7 +1294,7 @@ final class QuotaDetailPanelController {
     private func position(relativeTo statusView: NSView) {
         guard let statusWindow = statusView.window else { return }
         let statusRect = statusWindow.convertToScreen(statusView.convert(statusView.bounds, to: nil))
-        let size = NSSize(width: GlassTheme.windowWidth, height: GlassTheme.windowHeight)
+        let size = NSSize(width: GlassTheme.windowWidth, height: panel.frame.height)
         let topAnchor = min(statusRect.minY, statusWindow.frame.minY)
         var origin = NSPoint(
             x: statusRect.midX - size.width / 2,
@@ -1596,6 +1306,8 @@ final class QuotaDetailPanelController {
             if origin.y < visible.minY + 8 {
                 origin.y = max(statusRect.maxY, statusWindow.frame.maxY) - GlassTheme.shadowPadding
             }
+            origin.y = min(max(origin.y, visible.minY + 8 - GlassTheme.shadowPadding),
+                           visible.maxY - size.height + GlassTheme.shadowPadding)
         }
 
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
@@ -1609,9 +1321,9 @@ final class QuotaStatusView: NSView {
 
     private enum Metrics {
         static let height: CGFloat = 22
-        static let iconSize: CGFloat = 22
-        static let iconLeading: CGFloat = 1
-        static let iconTextGap: CGFloat = 2
+        static let iconSize: CGFloat = 20
+        static let iconLeading: CGFloat = 3
+        static let iconTextGap: CGFloat = 4
         static let trailing: CGFloat = 5
         static let lineHeight: CGFloat = 11
         static let textInset: CGFloat = 2
@@ -1619,7 +1331,7 @@ final class QuotaStatusView: NSView {
 
     private let iconView = NSImageView()
     private let primaryLabel = NSTextField(labelWithString: "内置 —")
-    private let secondaryLabel = NSTextField(labelWithString: "其他 —")
+    private let secondaryLabel = NSTextField(labelWithString: "额外 —")
     private var isPressed = false
 
     override init(frame frameRect: NSRect) {
@@ -1628,10 +1340,9 @@ final class QuotaStatusView: NSView {
         setAccessibilityRole(.button)
         setAccessibilityLabel("Cursor 剩余额度")
 
-        let symbol = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: "Cursor 额度")
-        iconView.image = symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .medium))
+        iconView.image = CursorBrand.markImage(size: 16)
         iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = .labelColor
         addSubview(iconView)
 
         for label in [primaryLabel, secondaryLabel] {
@@ -1658,10 +1369,21 @@ final class QuotaStatusView: NSView {
     }
 
     override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return !isHidden && bounds.contains(local) ? self : nil
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onLeftClick?()
+        return true
+    }
 
     override func layout() {
         super.layout()
-        iconView.frame = NSRect(x: Metrics.iconLeading, y: 0, width: Metrics.iconSize, height: Metrics.iconSize)
+        iconView.frame = NSRect(x: Metrics.iconLeading + 2, y: 3, width: 16, height: 16)
         let textX = Metrics.iconLeading + Metrics.iconSize + Metrics.iconTextGap
         let textWidth = max(24, bounds.width - textX - Metrics.trailing)
         primaryLabel.frame = NSRect(x: textX, y: 0, width: textWidth, height: Metrics.lineHeight)
@@ -1673,7 +1395,7 @@ final class QuotaStatusView: NSView {
             measuredTextWidth(primaryLabel.stringValue),
             measuredTextWidth(secondaryLabel.stringValue),
             measuredTextWidth("内置 100%"),
-            measuredTextWidth("其他 100%")
+            measuredTextWidth("额外 100%")
         )
         return ceil(
             Metrics.iconLeading
@@ -1700,22 +1422,23 @@ final class QuotaStatusView: NSView {
         return ceil(max(width, boundsWidth))
     }
 
-    func update(snapshot: QuotaSnapshot?) {
+    func update(snapshot: QuotaSnapshot?, connectionError: String = "") {
         let primary = snapshot?.primary
         let secondary = snapshot?.secondary
-        primaryLabel.stringValue = "\(primary?.badge ?? "内置") \(QuotaFormatter.percent(primary?.remaining))"
-        secondaryLabel.stringValue = "\(secondary?.badge ?? "其他") \(QuotaFormatter.percent(secondary?.remaining))"
+        primaryLabel.stringValue = "\(QuotaPresentation.badge(primary, secondary: false)) \(QuotaFormatter.percent(primary?.remaining))"
+        secondaryLabel.stringValue = "额外 \(QuotaFormatter.percent(secondary?.remaining))"
         primaryLabel.textColor = statusColor(primary?.remaining)
         secondaryLabel.textColor = statusColor(secondary?.remaining)
         let source: String
-        if snapshot?.sourceName == "cursor-api" {
+        if snapshot?.sourceName == "cursor-api" && connectionError.isEmpty {
             source = "实时"
         } else if snapshot == nil {
             source = "等待数据"
         } else {
             source = "快照"
         }
-        toolTip = "Cursor 额度 · \(source)"
+        toolTip = "Cursor 额度 · \(source)\n\(primaryLabel.stringValue)\n\(secondaryLabel.stringValue)"
+        setAccessibilityValue("\(primaryLabel.stringValue)，\(secondaryLabel.stringValue)，\(source)")
         needsLayout = true
         needsDisplay = true
     }
@@ -1729,8 +1452,8 @@ final class QuotaStatusView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if isPressed {
-            NSColor.selectedMenuItemColor.withAlphaComponent(0.25).setFill()
-            dirtyRect.fill()
+            NSColor.labelColor.withAlphaComponent(0.12).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
         }
     }
 
@@ -1753,7 +1476,14 @@ final class QuotaStatusView: NSView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let model = QuotaModel()
+    private let model: QuotaModel
+    private let previewScenario: PreviewScenario?
+
+    init(previewScenario: PreviewScenario? = nil) {
+        self.previewScenario = previewScenario
+        self.model = QuotaModel(previewScenario: previewScenario)
+        super.init()
+    }
     private var detailPanel: QuotaDetailPanelController!
     private var statusItem: NSStatusItem!
     private var statusView: QuotaStatusView!
@@ -1771,6 +1501,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in self?.updateStatusItem() }
             .store(in: &cancellables)
+        model.objectWillChange
+            .sink { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, let statusView = self.statusView else { return }
+                    self.updateStatusItem()
+                    self.detailPanel.refreshLayout(relativeTo: statusView)
+                }
+            }
+            .store(in: &cancellables)
         model.start()
         updateStatusItem()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -1781,6 +1520,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
         installPopoverDismissMonitors()
+        if previewScenario != nil || CommandLine.arguments.contains("--show-details") {
+            DispatchQueue.main.async { [weak self] in self?.showPopover() }
+        }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        closePopover()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1791,7 +1537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildDetailPanel() {
         detailPanel = QuotaDetailPanelController(
             model: model,
-            refresh: { [weak self] in self?.model.refresh(forceNetwork: true) },
+            refresh: { [weak self] in self?.refreshQuota() },
             dismiss: { [weak self] in self?.closePopover() }
         )
     }
@@ -1802,8 +1548,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusView.onLeftClick = { [weak self] in self?.togglePopover() }
         statusView.onLeftMouseUp = { [weak self] in self?.detailPanel.scheduleActivate() }
         statusView.onRightClick = { [weak self] in self?.showStatusMenu() }
-        statusItem.view = statusView
         statusItem.length = statusView.preferredWidth()
+        if let button = statusItem.button {
+            button.title = ""
+            button.image = nil
+            button.target = self
+            button.action = #selector(statusButtonPressed)
+            button.setAccessibilityLabel("Cursor 剩余额度")
+            button.addSubview(statusView)
+        }
 
         let show = NSMenuItem(title: "显示额度", action: #selector(showPopover), keyEquivalent: "")
         let refresh = NSMenuItem(title: "立即刷新", action: #selector(refreshQuota), keyEquivalent: "")
@@ -1874,7 +1627,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItem() {
         guard let statusView else { return }
-        statusView.update(snapshot: model.snapshot ?? model.fallbackSnapshot)
+        statusView.update(snapshot: model.snapshot ?? model.fallbackSnapshot, connectionError: model.connectionError)
+        statusItem.button?.setAccessibilityValue(statusView.accessibilityValue())
         let width = statusView.preferredWidth()
         statusView.frame = NSRect(x: 0, y: 0, width: width, height: 22)
         statusItem.length = width
@@ -1882,24 +1636,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusView.layoutSubtreeIfNeeded()
     }
 
+    @objc private func statusButtonPressed() {
+        togglePopover()
+    }
+
     @objc private func showPopover() {
         guard let statusView else { return }
         if !detailPanel.isShown {
             detailPanel.show(relativeTo: statusView)
+            previewEvent("shown")
         }
     }
 
     @objc private func closePopover() {
+        guard detailPanel?.isShown == true else { return }
         detailPanel.close()
+        previewEvent("closed")
     }
 
     private func togglePopover() {
         guard let statusView else { return }
         detailPanel.toggle(relativeTo: statusView)
+        previewEvent(detailPanel.isShown ? "shown" : "closed")
+    }
+
+    private func previewEvent(_ name: String) {
+        guard previewScenario != nil else { return }
+        print("Preview event: \(name)")
+        fflush(stdout)
     }
 
     @objc private func refreshQuota() {
         model.refresh(forceNetwork: true)
+        previewEvent("refreshed")
     }
 
     @objc private func openDashboard() {
@@ -1911,6 +1680,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quitApp() {
         NSApp.terminate(nil)
     }
+}
+
+private func addAmountProbeFields(_ snapshot: QuotaSnapshot, to result: inout [String: Any]) {
+    if let balance = snapshot.secondary.remainingAmountCents { result["SecondaryBalanceCents"] = balance }
+    if let total = snapshot.secondary.limitAmountCents { result["SecondaryPoolCents"] = total }
+    if let currency = snapshot.secondary.currencyCode { result["SecondaryCurrency"] = currency }
+    if let minutes = snapshot.primary.windowMinutes { result["PrimaryWindowMinutes"] = minutes }
+    if let reset = snapshot.primary.resetAt { result["PrimaryResetAt"] = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: reset)) }
 }
 
 func runProbe() -> Int32 {
@@ -1930,7 +1707,7 @@ func runProbe() -> Int32 {
     _ = semaphore.wait(timeout: .now() + 20)
 
     if let snapshot {
-        let result: [String: Any] = [
+        var result: [String: Any] = [
             "Status": "ok",
             "PlanType": snapshot.planType as Any,
             "IncludedRemain": snapshot.primary.remaining as Any,
@@ -1939,6 +1716,7 @@ func runProbe() -> Int32 {
             "SampledAt": ISO8601DateFormatter().string(from: snapshot.sampledAt),
             "SourceName": snapshot.sourceName
         ]
+        addAmountProbeFields(snapshot, to: &result)
         if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]),
            let text = String(data: data, encoding: .utf8) {
             print(text)
@@ -1947,7 +1725,7 @@ func runProbe() -> Int32 {
     }
 
     if let fallback = SnapshotCache.load() {
-        let result: [String: Any] = [
+        var result: [String: Any] = [
             "Status": "ok",
             "PlanType": fallback.planType as Any,
             "IncludedRemain": fallback.primary.remaining as Any,
@@ -1956,6 +1734,7 @@ func runProbe() -> Int32 {
             "SampledAt": ISO8601DateFormatter().string(from: fallback.sampledAt),
             "SourceName": fallback.sourceName
         ]
+        addAmountProbeFields(fallback, to: &result)
         if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]),
            let text = String(data: data, encoding: .utf8) {
             print(text)
@@ -1978,12 +1757,35 @@ func runProbe() -> Int32 {
 @main
 struct CursorQuotaPetMain {
     static func main() {
+        let hasPreviewOptions = CommandLine.arguments.contains { $0.hasPrefix("--preview-") }
+        if hasPreviewOptions && CommandLine.arguments.contains("--probe") {
+            fputs("离线预览不能与 --probe 同时使用。\n", stderr)
+            Foundation.exit(2)
+        }
+        if hasPreviewOptions && !CommandLine.arguments.contains(where: { $0 == "--preview-ui" || $0.hasPrefix("--preview-ui=") }) {
+            fputs("预览选项需要配合 --preview-ui 使用。\n", stderr)
+            Foundation.exit(2)
+        }
         if CommandLine.arguments.contains("--probe") {
             Foundation.exit(runProbe())
         }
 
+        let previewArgument = CommandLine.arguments.first { $0 == "--preview-ui" || $0.hasPrefix("--preview-ui=") }
+        var previewScenario: PreviewScenario?
+        if let previewArgument {
+            let name = previewArgument.split(separator: "=", maxSplits: 1).dropFirst().first.map(String.init) ?? "normal"
+            guard let scenario = PreviewScenario(rawValue: name) else {
+                fputs("未知预览场景。可选：normal, warning, critical, empty, snapshot, error\n", stderr)
+                Foundation.exit(2)
+            }
+            previewScenario = scenario
+        }
         let application = NSApplication.shared
-        let delegate = AppDelegate()
+        if previewScenario != nil {
+            if CommandLine.arguments.contains("--appearance=light") { application.appearance = NSAppearance(named: .aqua) }
+            if CommandLine.arguments.contains("--appearance=dark") { application.appearance = NSAppearance(named: .darkAqua) }
+        }
+        let delegate = AppDelegate(previewScenario: previewScenario)
         application.delegate = delegate
         application.run()
     }

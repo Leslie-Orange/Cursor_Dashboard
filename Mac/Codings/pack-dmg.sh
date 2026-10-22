@@ -16,37 +16,20 @@ VOLUME_NAME="$APP_DISPLAY_NAME"
 SOURCE_APP="$CODING_DIR/CursorQuotaPet.app"
 STAGED_APP="$STAGE_DIR/${APP_DISPLAY_NAME}.app"
 ICON_FILE="$CODING_DIR/AppIcon.icns"
+LAYOUT_FILE="$CODING_DIR/dmg-layout.dsstore"
 
-SOURCE_PNG="$CODING_DIR/icon/app-icon.png"
-if [[ ! -f "$SOURCE_PNG" ]]; then
-  print -u2 "找不到已确认的图标：$SOURCE_PNG"
+if [[ ! -f "$LAYOUT_FILE" ]]; then
+  print -u2 "找不到磁盘映像布局文件：$LAYOUT_FILE"
   exit 1
 fi
 
-print "将应用图标封装为 icns…"
-ICONSET="$CODING_DIR/AppIcon.iconset"
-rm -rf "$ICONSET"
-mkdir -p "$ICONSET"
-resize_icon() {
-  local pixels="$1"
-  local name="$2"
-  sips -z "$pixels" "$pixels" "$SOURCE_PNG" --out "$ICONSET/$name" >/dev/null
-}
-resize_icon 16 icon_16x16.png
-resize_icon 32 icon_16x16@2x.png
-resize_icon 32 icon_32x32.png
-resize_icon 64 icon_32x32@2x.png
-resize_icon 128 icon_128x128.png
-resize_icon 256 icon_128x128@2x.png
-resize_icon 256 icon_256x256.png
-resize_icon 512 icon_256x256@2x.png
-resize_icon 512 icon_512x512.png
-resize_icon 1024 icon_512x512@2x.png
-iconutil -c icns -o "$ICON_FILE" "$ICONSET"
-rm -rf "$ICONSET"
-
 print "编译通用应用…"
 UNIVERSAL=1 "$CODING_DIR/build-mac.sh"
+
+if [[ ! -f "$CODING_DIR/icon/app-icon.png" || ! -f "$ICON_FILE" ]]; then
+  print -u2 "构建流程未生成所需的 PNG 或 ICNS 图标。"
+  exit 1
+fi
 
 rm -rf "$STAGE_DIR" "$SCRATCH_DIR"
 mkdir -p "$STAGE_DIR" "$SCRATCH_DIR"
@@ -68,6 +51,8 @@ cat > "$STAGE_DIR/安装说明.txt" <<'EOF'
 使用
 保持 Cursor 已登录即可读取额度。左键看详情，右键可刷新或退出。
 EOF
+
+cp "$LAYOUT_FILE" "$STAGE_DIR/.DS_Store"
 
 xattr -cr "$STAGED_APP" >/dev/null 2>&1 || true
 if command -v codesign >/dev/null 2>&1; then
@@ -91,8 +76,6 @@ exit(ok ? 0 : 1)
 '
 }
 
-set_finder_icon "$STAGED_APP" "$ICON_FILE"
-
 rm -f "$RW_DMG" "$FINAL_DMG"
 hdiutil create \
   -volname "$VOLUME_NAME" \
@@ -110,34 +93,6 @@ cleanup() {
   hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-
-osascript <<EOF >/dev/null
-tell application "Finder"
-  tell disk "$VOLUME_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set bounds of container window to {120, 120, 740, 480}
-    set theViewOptions to the icon view options of container window
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 96
-    delay 0.4
-    try
-      set position of item "${APP_DISPLAY_NAME}.app" to {160, 180}
-    end try
-    try
-      set position of item "Applications" to {460, 180}
-    end try
-    try
-      set position of item "安装说明.txt" to {310, 340}
-    end try
-    update without registering applications
-    delay 0.6
-    close
-  end tell
-end tell
-EOF
 
 if command -v SetFile >/dev/null 2>&1; then
   SetFile -a C "$MOUNT_DIR" >/dev/null 2>&1 || true

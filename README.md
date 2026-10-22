@@ -1,10 +1,10 @@
 # Cursor 额度仪表盘
 
-macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在计费周期内的剩余额度。
+macOS 菜单栏与 Windows 托盘小工具，显示当前 Cursor 账号的限额与额外额度池。
 
-状态栏会直接显示两行剩余比例，例如上面是 `内置 76%`，下面是 `其他 45%`。Windows 托盘图标上是这两行数字；鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+macOS 1.5.0 的菜单栏显示主限额和额外池的剩余比例；详情卡片按新账户展示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘继续显示内置与其他模型池的两行百分比。Windows 鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
-本工具读取的是 **Cursor 套餐用量**（本月已用 / 剩余 / 重置时间，以及内置模型与其他模型分项），不是 ChatGPT 或 Codex 的限额窗口。
+本工具读取的是 **Cursor 套餐用量**（剩余值、重置时间，以及内置额度和额外额度池），不是 ChatGPT 或 Codex 的限额窗口。
 
 ## 仓库结构
 
@@ -19,6 +19,9 @@ macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在
 ## 功能
 
 - 菜单栏 / 托盘常驻，无需打开主窗口
+- macOS 1.5.0 详情采用系统原生玻璃材质，旧版 macOS 使用匹配的半透明效果
+- macOS 菜单栏将第二行统一标为「额外」；应用图标与菜单栏标记使用同一套扁平矢量图形
+- macOS 1.5.0 按套餐周期显示周限额或旧月限额；额外额度池优先显示信用额度余额 / 总额
 - 显示套餐 / 计划名称
 - Windows 显示本周期内置模型池和其他模型池的剩余百分比，与官方的两类用量条对齐
 - 未返回内置模型池比例时，回退到套餐金额额度，并显示已用金额 / 上限
@@ -63,8 +66,12 @@ macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在
   回退：企业/旧版按「请求次数」计量的分桶用量。
 - `GET https://api2.cursor.sh/auth/full_stripe_profile`  
   回退：订阅类型（Pro / Ultra / Team 等）。
+- `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance`
+  macOS 1.5.0 只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
+- `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling`
+  没有活动信用额度池时，只读预付额度余额、充值总额与已用金额（`availableCents`、`fundedCents`、`spentCents`）。
 
-这些是 Cursor 仪表盘使用的内部接口，不是公开稳定 API，字段可能变化。金额与百分比仍以官方页面为准：
+以上额度接口只读，不会创建或修改额度。金额字段以美分为单位，macOS 详情按美元格式显示，例如 `25` 表示 `$0.25`。这些是 Cursor 仪表盘使用的内部接口，不是公开稳定 API，字段可能变化。金额与百分比仍以官方页面为准：
 
 <https://cursor.com/dashboard/usage>
 
@@ -82,13 +89,21 @@ macOS 菜单栏与 Windows 托盘小工具，常驻显示当前 Cursor 账号在
 
 消耗速度按「本周期已用百分比 ÷ 周期内已过去天数」计算，例如 30 天窗口已过约 3 天、已用 5%，则约为 `1.7%/天`。周期刚开始不足 1 小时时，按 1 小时折算，避免数字被放大。
 
-Cursor 的额度按**当前计费月**计算。根据 [官方模型与额度说明](https://cursor.com/docs/models-and-pricing#usage-pools)，内置模型（Cursor Models）和其他模型（Other Models）各有独立额度池。Windows 第一行优先按 `100 - autoPercentUsed` 计算内置模型池剩余，第二行按 `100 - apiPercentUsed` 计算其他模型池剩余。接口的这些字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`。托盘、悬浮提示和详情统一四舍五入为整数百分比。
+## macOS 1.5.0 额度口径
 
-`includedSpend / limit` 是另一种金额额度口径，可能已达到上限，而内置模型池仍有剩余；Windows 仅在接口未返回内置模型池比例时回退到这一口径。macOS 当前仍使用原有的金额额度优先逻辑。
+新套餐若 `includedUsagePeriod` 表示 weekly，主卡显示 7 天周限额百分比，并优先使用 `includedUsageResetsAt` 作为重置时间；旧月套餐仍使用月周期字段。主卡标题会显示「周限额」或「月限额」。
+
+额外池优先使用信用额度接口的 `creditBalanceCents / totalCents`；没有可用信用额度时回退到预付额度的 `availableCents / fundedCents`。详情卡显示余额 / 额度池总额，状态栏第二行在金额数据可用时显示对应剩余比例。旧月套餐也兼容 `apiLimit - apiSpend` 这组直接金额字段。只有 `apiPercentUsed` 时不会据此推算金额；金额数据缺失时详情显示 `— / —`，额外池不继承主卡的周重置时间。
+
+## Windows 额度口径
+
+Windows 端仍按**当前计费月**展示。根据 [官方模型与额度说明](https://cursor.com/docs/models-and-pricing#usage-pools)，内置模型（Cursor Models）和其他模型（Other Models）各有独立额度池。Windows 第一行优先按 `100 - autoPercentUsed` 计算内置模型池剩余，第二行按 `100 - apiPercentUsed` 计算其他模型池剩余。接口的这些字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`。托盘、悬浮提示和详情统一四舍五入为整数百分比。
+
+`includedSpend / limit` 是另一种金额额度口径，可能已达到上限，而内置模型池仍有剩余；Windows 仅在接口未返回内置模型池比例时回退到这一口径。macOS 的周限额与额外额度池按上方说明读取和显示。
 
 ## macOS 安装（推荐）
 
-双击 [`Mac/Packages/Cursor额度仪表盘-1.4.0.dmg`](Mac/Packages/Cursor额度仪表盘-1.4.0.dmg)，把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
+1.5.0 安装盘：[Cursor额度仪表盘-1.5.0.dmg](Mac/Packages/Cursor额度仪表盘-1.5.0.dmg)。把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
 
 这是菜单栏应用：启动后请看屏幕右上角，不会在 Dock 常驻。首次打开若被系统拦截，按住 Control 单击应用并选择「打开」。
 
@@ -99,7 +114,7 @@ chmod +x "./Mac/Codings/pack-dmg.sh"
 ./Mac/Codings/pack-dmg.sh
 ```
 
-会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.4.0.dmg`。
+会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.5.0.dmg`。
 
 ## macOS 从源码启动
 
@@ -118,6 +133,7 @@ chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.s
 ```zsh
 ./Mac/Codings/build-mac.sh
 ./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --probe
+./Mac/Codings/test-appearance.sh
 ```
 
 `build-mac.sh` 会按当前 Mac 的 CPU 架构编译，并以 macOS 13.0 为最低兼容版本。自检成功时输出类似：
@@ -133,6 +149,24 @@ chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.s
 ```
 
 自检失败时只会说明原因（未登录、网络错误等），不会打印令牌。
+
+外观预览可以离线运行，不需要 Cursor 登录态，也不会读取或写入快照缓存、请求网络：
+
+```zsh
+./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --preview-ui=normal --appearance=light
+./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --preview-ui=warning --appearance=dark
+./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --preview-ui=snapshot --appearance=dark --preview-reduce-transparency --preview-reduce-motion
+```
+
+`--preview-ui=` 接受 `normal`、`warning`、`critical`、`empty`、`snapshot` 和 `error` 六种样例：前 3 种显示当前样例，`empty` 显示无数据状态，`snapshot` 显示快照，`error` 显示网络错误与快照。`--appearance=light|dark` 只覆盖预览进程的应用外观；两个 `--preview-reduce-*` 参数用于检查降低透明度和减少动态效果时的界面。预览会自动打开详情。
+
+要用本机真实额度直接打开详情（会读取登录态并正常联网刷新），运行：
+
+```zsh
+./Mac/Codings/CursorQuotaPet.app/Contents/MacOS/CursorQuotaPet --show-details
+```
+
+`test-appearance.sh` 会在临时目录编译离线断言套件，不启动 `--probe`，也不构建或打包应用。
 
 ## Windows 安装
 
