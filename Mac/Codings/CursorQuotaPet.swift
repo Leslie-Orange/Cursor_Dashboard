@@ -12,16 +12,16 @@ struct QuotaWindow {
     let badge: String
     let title: String
     let detail: String?
-    let subtitle: String?
+    let schedule: String?
 }
 
 struct QuotaSnapshot {
     let planType: String?
+    let planNote: String?
     let primary: QuotaWindow
     let secondary: QuotaWindow
     let sampledAt: Date
     let sourceName: String
-    let weeklyPool: Bool
 }
 
 enum JSONValue {
@@ -88,6 +88,109 @@ enum JSONValue {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: string)
+    }
+}
+
+enum PlanCatalog {
+    enum Model {
+        case unknown
+        case weekly
+        case legacyDual
+        case legacyCursor
+        case pooled
+    }
+
+    static func key(_ planType: String?) -> String {
+        (planType ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    static func model(_ planType: String?, legacyFlag: Bool) -> Model {
+        let key = key(planType)
+        if key.isEmpty { return .unknown }
+        if key == "hobby" || key == "start" || key == "cursorstart" { return .legacyCursor }
+        if isLegacyDualName(key) { return .legacyDual }
+        if key == "enterprise" { return .pooled }
+        if key == "business" { return .legacyDual }
+        if key == "ultra" || key == "team" || key == "teams" {
+            return legacyFlag ? .legacyDual : .weekly
+        }
+        if isWeeklyName(key) { return .weekly }
+        return .unknown
+    }
+
+    static func display(_ planType: String?) -> String? {
+        switch key(planType) {
+        case "free", "freetrial": return "Free"
+        case "plus": return "Plus"
+        case "premium": return "Premium"
+        case "super": return "Super"
+        case "ultra", "ultralegacy", "legacyultra": return "Ultra"
+        case "hobby": return "Hobby"
+        case "start", "cursorstart": return "Start"
+        case "pro": return "Pro"
+        case "proplus", "pro+": return "Pro+"
+        case "business": return "Business"
+        case "enterprise": return "Enterprise"
+        case "team", "teams": return "Teams"
+        case "teamsstandard", "teamstandard": return "Teams Standard"
+        case "teamspremium", "teampremium": return "Teams Premium"
+        default: return nil
+        }
+    }
+
+    static func note(_ planType: String?, model: Model) -> String? {
+        let key = key(planType)
+        if model == .unknown { return nil }
+        if key == "plus" { return "基础 · 每周" }
+        if key == "premium" { return "4× Plus · 每周" }
+        if key == "super" { return "15× Plus · 每周" }
+        if key == "ultra" && model == .weekly { return "50× Plus · 每周" }
+        if key == "free" || key == "freetrial" || key == "hobby" { return "有限" }
+        if key == "start" || key == "cursorstart" { return "仅内置 · 每月" }
+        if key == "teamspremium" || key == "teampremium" { return "5× Standard · 每月" }
+        if key == "team" || key == "teams" { return model == .weekly ? "按席位 · 每周" : "月度双池" }
+        if key == "enterprise" { return "共享池" }
+        if model == .legacyDual || model == .legacyCursor {
+            return model == .legacyCursor ? "仅内置 · 每月" : "月度双池"
+        }
+        return nil
+    }
+
+    static func allowance(_ planType: String?, model: Model) -> String? {
+        guard model == .weekly else { return nil }
+        switch key(planType) {
+        case "plus": return "基础"
+        case "premium": return "4× Plus"
+        case "super": return "15× Plus"
+        case "ultra": return "50× Plus"
+        case "team", "teams": return "按席位"
+        case "free", "freetrial": return "有限"
+        default: return nil
+        }
+    }
+
+    static func includesOtherPool(_ model: Model) -> Bool {
+        model == .unknown || model == .legacyDual
+    }
+
+    static func thirdPartyPrepaid(_ planType: String?, model: Model) -> Bool {
+        if model == .pooled { return true }
+        guard model == .weekly else { return false }
+        let key = key(planType)
+        return key != "plus" && key != "free" && key != "freetrial"
+    }
+
+    private static func isLegacyDualName(_ key: String) -> Bool {
+        ["pro", "proplus", "pro+", "teamsstandard", "teamstandard", "teamspremium", "teampremium", "ultralegacy", "legacyultra"].contains(key)
+    }
+
+    private static func isWeeklyName(_ key: String) -> Bool {
+        ["free", "freetrial", "plus", "premium", "super", "ultra", "team", "teams"].contains(key)
     }
 }
 
@@ -162,247 +265,164 @@ enum QuotaParser {
             JSONValue.value(summary, names: ["billingCycleStart"]),
             JSONValue.value(authUsage, names: ["startOfMonth"])
         ])
-        let cycleEnd = firstDate([
+        var cycleEnd = firstDate([
             JSONValue.value(dashboard, names: ["billingCycleEnd"]),
             JSONValue.value(summary, names: ["billingCycleEnd"]),
             JSONValue.nested(planInfo, path: ["planInfo", "billingCycleEnd"]),
             JSONValue.value(planInfo, names: ["billingCycleEnd"])
         ])
-        let weeklyReset = firstDate([
-            JSONValue.nested(planInfo, path: ["planInfo", "includedUsageResetsAt"]),
-            JSONValue.value(planInfo, names: ["includedUsageResetsAt"]),
-            JSONValue.value(summary, names: ["includedUsageResetsAt"]),
-            JSONValue.value(dashboard, names: ["includedUsageResetsAt"])
-        ])
+        if cycleEnd == nil, let cycleStart {
+            cycleEnd = cycleStart.addingTimeInterval(30 * 24 * 60 * 60)
+        }
+        let resetAt = cycleEnd?.timeIntervalSince1970
+        let windowMinutes: Double?
+        if let cycleStart, let cycleEnd {
+            windowMinutes = max(1, cycleEnd.timeIntervalSince(cycleStart) / 60)
+        } else {
+            windowMinutes = 30 * 24 * 60
+        }
 
         let planType = JSONValue.string(JSONValue.nested(planInfo, path: ["planInfo", "planName"]))
             ?? JSONValue.string(JSONValue.value(planInfo, names: ["planName", "planType"]))
             ?? JSONValue.string(JSONValue.value(summary, names: ["membershipType"]))
             ?? JSONValue.string(JSONValue.value(stripe, names: ["membershipType", "individualMembershipType"]))
             ?? localPlan
-        let planKey = QuotaFormatter.planKey(planType)
-        let cycleWeekly = isWeekCycle(cycleStart, cycleEnd)
-        let weekly = periodIsWeekly(JSONValue.nested(planInfo, path: ["planInfo", "includedUsagePeriod"]))
-            || periodIsWeekly(JSONValue.value(planInfo, names: ["includedUsagePeriod"]))
-            || periodIsWeekly(JSONValue.value(summary, names: ["includedUsagePeriod"]))
-            || periodIsWeekly(JSONValue.value(dashboard, names: ["includedUsagePeriod"]))
-            || cycleWeekly
-            || planKey == "plus"
-            || planKey == "premium"
-            || planKey == "super"
 
-        var usageStart = cycleStart
-        var usageEnd = cycleEnd
-        if weekly && !cycleWeekly {
-            if let weeklyReset {
-                usageEnd = weeklyReset
-                usageStart = weeklyReset.addingTimeInterval(-7 * 24 * 60 * 60)
-            } else {
-                usageStart = nil
-                usageEnd = nil
-            }
-        }
-        if usageEnd == nil, let usageStart {
-            usageEnd = usageStart.addingTimeInterval((weekly ? 7 : 30) * 24 * 60 * 60)
-        } else if !weekly && usageEnd == nil, let cycleStart {
-            usageEnd = cycleStart.addingTimeInterval(30 * 24 * 60 * 60)
-        }
-        let windowMinutes: Double?
-        if let usageStart, let usageEnd {
-            windowMinutes = max(1, usageEnd.timeIntervalSince(usageStart) / 60)
-        } else if weekly {
-            windowMinutes = 7 * 24 * 60
-        } else {
-            windowMinutes = 30 * 24 * 60
-        }
-        let resetAt = (weekly ? (weeklyReset ?? usageEnd) : usageEnd)?.timeIntervalSince1970
-        let thirdParty = thirdPartyIncluded(planKey)
-
-        let primary: QuotaWindow
-        if weekly {
-            let periodUsage = JSONValue.dictionary(JSONValue.value(dashboard, names: ["planUsage"]))
-            let weekUsed = firstPoints([JSONValue.value(periodUsage, names: ["totalPercentUsed"])])
-                ?? firstPoints([JSONValue.value(periodUsage, names: ["autoPercentUsed"])])
-            primary = QuotaWindow(
-                remaining: weekUsed.map { clampPercent(100 - $0) },
-                used: weekUsed,
-                resetAt: resetAt,
-                windowMinutes: windowMinutes,
-                badge: "周池",
-                title: "本周额度剩余",
-                detail: includedLabel(planKey, weekly: true),
-                subtitle: nil
-            )
-        } else {
-            let quotaIsAllowance = autoUsedPercent == nil && allowance != nil
-            let legacyDetail = quotaIsAllowance
-                ? amountDetail(
-                    used: includedSpend,
-                    remaining: centsRemaining,
-                    limit: centsLimit,
-                    request: nil,
-                    onDemandEnabled: false,
-                    onDemandUsed: nil
-                )
-                : includedLabel(planKey, weekly: false)
-            primary = QuotaWindow(
-                remaining: quotaIsAllowance ? allowance?.remaining : builtinRemaining,
-                used: quotaIsAllowance
-                    ? allowance?.used
-                    : (builtinUsedPercent ?? builtinRemaining.map { 100 - $0 }),
-                resetAt: resetAt,
-                windowMinutes: windowMinutes,
-                badge: quotaIsAllowance ? "额度" : "内置",
-                title: quotaIsAllowance ? "套餐剩余" : "内置模型剩余",
-                detail: legacyDetail,
-                subtitle: nil
-            )
-        }
-
-        if primary.remaining == nil && otherUsedPercent == nil && requestBucket == nil && (planType ?? "").isEmpty {
-            return nil
-        }
-        if !weekly && primary.remaining == nil && otherUsedPercent == nil && requestBucket == nil {
+        // Included usage follows the plan. Current X Subscription plans have one
+        // weekly Cursor-model pool. Legacy Pro / Pro+ / Ultra keep two monthly pools.
+        let quotaIsAllowance = autoUsedPercent == nil && allowance != nil
+        let primaryRemaining = allowance?.remaining ?? builtinRemaining
+        guard primaryRemaining != nil || otherUsedPercent != nil || requestBucket != nil else {
             return nil
         }
 
-        let secondary: QuotaWindow
-        if weekly || !thirdParty {
-            if !thirdParty {
-                secondary = QuotaWindow(
-                    remaining: nil,
-                    used: nil,
-                    resetAt: nil,
-                    windowMinutes: nil,
-                    badge: "第三方",
-                    title: "第三方模型",
-                    detail: "不可用",
-                    subtitle: "本档不含"
-                )
-            } else {
-                secondary = prepaidWindow(summary: summary, planUsage: planUsage)
-            }
-        } else if let otherUsedPercent {
-            secondary = QuotaWindow(
-                remaining: min(100, max(0, 100 - otherUsedPercent)),
-                used: otherUsedPercent,
-                resetAt: resetAt,
-                windowMinutes: windowMinutes,
-                badge: "其他",
-                title: "其他模型剩余",
-                detail: nil,
-                subtitle: nil
+        let legacyFlag = legacyFlag(summary: summary, planInfo: planInfo, stripe: stripe)
+        let planModel = PlanCatalog.model(planType, legacyFlag: legacyFlag)
+        let planKey = PlanCatalog.key(planType)
+        let allowanceDetail = quotaIsAllowance
+            ? amountDetail(
+                used: includedSpend,
+                remaining: centsRemaining,
+                limit: centsLimit,
+                request: nil,
+                onDemandEnabled: false,
+                onDemandUsed: nil
             )
-        } else if let bucket = requestBucket, bucket.limit > 0 {
-            let remaining = min(100, max(0, (bucket.limit - bucket.used) / bucket.limit * 100))
-            secondary = QuotaWindow(
-                remaining: remaining,
-                used: 100 - remaining,
-                resetAt: resetAt,
-                windowMinutes: windowMinutes,
-                badge: "其他",
-                title: "其他模型剩余",
-                detail: String(format: "%.0f / %.0f 次", bucket.used, bucket.limit),
-                subtitle: nil
-            )
+            : nil
+        let primaryBadge: String
+        let primaryTitle: String
+        if quotaIsAllowance {
+            primaryBadge = "额度"
+            primaryTitle = "套餐剩余"
+        } else if planModel == .weekly && (planKey == "free" || planKey == "freetrial") {
+            primaryBadge = "有限"
+            primaryTitle = "有限额度"
+        } else if planModel == .weekly {
+            primaryBadge = "本周"
+            primaryTitle = "Cursor 模型剩余"
+        } else if planModel == .pooled {
+            primaryBadge = "共享"
+            primaryTitle = "共享额度剩余"
         } else {
-            secondary = QuotaWindow(
-                remaining: nil,
-                used: nil,
-                resetAt: resetAt,
-                windowMinutes: windowMinutes,
-                badge: "其他",
-                title: "其他模型剩余",
-                detail: nil,
-                subtitle: nil
-            )
+            primaryBadge = "内置"
+            primaryTitle = "内置模型剩余"
         }
+        let primarySchedule = planModel == .weekly
+            ? ((planKey == "free" || planKey == "freetrial") ? "有限额度" : "每周重置")
+            : nil
+        let primaryDetail = (!quotaIsAllowance && planModel == .weekly)
+            ? PlanCatalog.allowance(planType, model: planModel)
+            : allowanceDetail
+        let primary = QuotaWindow(
+            remaining: primaryRemaining,
+            used: quotaIsAllowance ? allowance?.used : (builtinUsedPercent ?? builtinRemaining.map { 100 - $0 }),
+            resetAt: planModel == .weekly ? nil : resetAt,
+            windowMinutes: planModel == .weekly ? nil : windowMinutes,
+            badge: primaryBadge,
+            title: primaryTitle,
+            detail: primaryDetail,
+            schedule: primarySchedule
+        )
+        let secondary = secondaryWindow(
+            planType: planType,
+            planModel: planModel,
+            otherUsedPercent: otherUsedPercent,
+            requestBucket: requestBucket,
+            resetAt: resetAt,
+            windowMinutes: windowMinutes,
+            summary: summary,
+            dashboard: dashboard,
+            planInfo: planInfo
+        )
 
         return QuotaSnapshot(
             planType: planType,
+            planNote: PlanCatalog.note(planType, model: planModel),
             primary: primary,
             secondary: secondary,
             sampledAt: sampledAt,
-            sourceName: sourceName,
-            weeklyPool: weekly
+            sourceName: sourceName
         )
     }
 
-    private static func isWeekCycle(_ start: Date?, _ end: Date?) -> Bool {
-        guard let start, let end else { return false }
-        let days = end.timeIntervalSince(start) / 86_400
-        return days >= 6 && days <= 8
-    }
-
-    private static func periodIsWeekly(_ value: Any?) -> Bool {
-        if let number = JSONValue.number(value) {
-            return abs(number - 2) < 0.001
-        }
-        guard let text = JSONValue.string(value)?.lowercased() else { return false }
-        return text.contains("week")
-    }
-
-    private static func thirdPartyIncluded(_ planKey: String) -> Bool {
-        !["plus", "free", "hobby", "start", "freetrial"].contains(planKey)
-    }
-
-    private static func includedLabel(_ planKey: String, weekly: Bool) -> String? {
-        if planKey == "free" || planKey == "hobby" { return "有限" }
-        if planKey == "start" { return "仅内置" }
-        guard weekly else { return nil }
-        switch planKey {
-        case "plus": return "基础周池"
-        case "premium": return "4× Plus"
-        case "super": return "15× Plus"
-        case "ultra": return "50× Plus"
-        case "team", "teams", "business": return "与席位同档"
-        case "enterprise": return "企业共享池"
-        default: return nil
-        }
-    }
-
-    private static func prepaidWindow(summary: [String: Any]?, planUsage: [String: Any]?) -> QuotaWindow {
-        let onDemand = JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "onDemand"]))
-        let used = JSONValue.number(JSONValue.value(onDemand, names: ["used"]))
-        let limit = JSONValue.number(JSONValue.value(onDemand, names: ["limit"]))
-        let remaining = JSONValue.number(JSONValue.value(onDemand, names: ["remaining"]))
-        let enabled = onDemand?["enabled"] as? Bool ?? false
-        if let limit, limit > 0, enabled || (used ?? 0) > 0 {
-            let remainCents = remaining ?? max(0, limit - (used ?? 0))
-            let remainPercent = clampPercent(remainCents / limit * 100)
+    private static func secondaryWindow(
+        planType: String?,
+        planModel: PlanCatalog.Model,
+        otherUsedPercent: Double?,
+        requestBucket: (name: String, used: Double, limit: Double)?,
+        resetAt: TimeInterval?,
+        windowMinutes: Double?,
+        summary: [String: Any]?,
+        dashboard: [String: Any]?,
+        planInfo: [String: Any]?
+    ) -> QuotaWindow {
+        if PlanCatalog.includesOtherPool(planModel) {
+            if let otherUsedPercent {
+                return QuotaWindow(
+                    remaining: min(100, max(0, 100 - otherUsedPercent)),
+                    used: otherUsedPercent,
+                    resetAt: resetAt,
+                    windowMinutes: windowMinutes,
+                    badge: "其他",
+                    title: "其他模型剩余",
+                    detail: nil,
+                    schedule: nil
+                )
+            }
+            if let bucket = requestBucket, bucket.limit > 0 {
+                let remaining = min(100, max(0, (bucket.limit - bucket.used) / bucket.limit * 100))
+                return QuotaWindow(
+                    remaining: remaining,
+                    used: 100 - remaining,
+                    resetAt: resetAt,
+                    windowMinutes: windowMinutes,
+                    badge: "其他",
+                    title: "其他模型剩余",
+                    detail: nil,
+                    schedule: nil
+                )
+            }
             return QuotaWindow(
-                remaining: remainPercent,
-                used: clampPercent(100 - remainPercent),
-                resetAt: nil,
-                windowMinutes: nil,
-                badge: "预付",
-                title: "预付余额",
-                detail: centPair(used: used, remaining: remainCents, limit: limit),
-                subtitle: "本月上限"
+                remaining: nil,
+                used: nil,
+                resetAt: resetAt,
+                windowMinutes: windowMinutes,
+                badge: "其他",
+                title: "其他模型剩余",
+                detail: nil,
+                schedule: nil
             )
         }
-        if let balance = explicitBalance(summary: summary, planUsage: planUsage) {
+        if PlanCatalog.thirdPartyPrepaid(planType, model: planModel) {
             return QuotaWindow(
                 remaining: nil,
                 used: nil,
                 resetAt: nil,
                 windowMinutes: nil,
                 badge: "预付",
-                title: "预付余额",
-                detail: dollars(max(0, balance)),
-                subtitle: "不随周池重置"
-            )
-        }
-        if let used, used > 0 {
-            return QuotaWindow(
-                remaining: nil,
-                used: nil,
-                resetAt: nil,
-                windowMinutes: nil,
-                badge: "预付",
-                title: "预付余额",
-                detail: "已加量 " + dollars(used),
-                subtitle: "从预付扣除"
+                title: "第三方预付",
+                detail: prepaidDetail(summary: summary, dashboard: dashboard, planInfo: planInfo) ?? "按量",
+                schedule: "用完为止"
             )
         }
         return QuotaWindow(
@@ -410,42 +430,46 @@ enum QuotaParser {
             used: nil,
             resetAt: nil,
             windowMinutes: nil,
-            badge: "预付",
-            title: "预付余额",
-            detail: "按量计费",
-            subtitle: "从预付扣除"
+            badge: "第三方",
+            title: "第三方模型",
+            detail: "不含",
+            schedule: nil
         )
     }
 
-    private static func explicitBalance(summary: [String: Any]?, planUsage: [String: Any]?) -> Double? {
-        if let direct = JSONValue.number(JSONValue.value(summary, names: [
-            "prepaidCreditCents", "prepaidBalanceCents", "creditBalanceCents",
-            "customerBalanceCents", "prepaidCredit", "creditBalance"
-        ])) {
-            return direct
-        }
-        if let direct = JSONValue.number(JSONValue.value(planUsage, names: [
-            "prepaidCreditCents", "creditBalanceCents", "prepaidCredit"
-        ])) {
-            return direct
-        }
-        let prepaid = JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "prepaid"]))
-            ?? JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "credit"]))
-        return JSONValue.number(JSONValue.value(prepaid, names: ["remaining", "balance", "cents"]))
+    private static func legacyFlag(summary: [String: Any]?, planInfo: [String: Any]?, stripe: [String: Any]?) -> Bool {
+        if isTrue(JSONValue.value(summary, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        if isTrue(JSONValue.value(planInfo, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        if isTrue(JSONValue.nested(planInfo, path: ["planInfo", "isLegacyPlan"])) { return true }
+        if isTrue(JSONValue.value(stripe, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        let pricing = JSONValue.string(JSONValue.value(summary, names: ["pricingModel", "usageAccounting"]))
+            ?? JSONValue.string(JSONValue.value(stripe, names: ["pricingModel", "usageAccounting"]))
+        return pricing?.lowercased().contains("legacy") == true
     }
 
-    private static func centPair(used: Double?, remaining: Double?, limit: Double?) -> String? {
-        guard let limit, limit >= 100 else { return nil }
-        let usedValue = used ?? max(0, limit - (remaining ?? limit))
-        return "\(dollars(usedValue)) / \(dollars(limit))"
+    private static func isTrue(_ value: Any?) -> Bool {
+        if let flag = value as? Bool { return flag }
+        return JSONValue.string(value)?.lowercased() == "true"
     }
 
-    private static func dollars(_ cents: Double) -> String {
-        let amount = cents / 100
-        if abs(amount - amount.rounded()) < 0.001 {
-            return String(format: "$%.0f", amount)
+    private static func prepaidDetail(summary: [String: Any]?, dashboard: [String: Any]?, planInfo: [String: Any]?) -> String? {
+        let individual = JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage"]))
+        let prepaid = JSONValue.dictionary(JSONValue.nested(summary, path: ["prepaid"]))
+        let cents = JSONValue.number(JSONValue.value(summary, names: ["prepaidCreditRemainingCents", "creditBalanceCents"]))
+            ?? JSONValue.number(JSONValue.value(individual, names: ["prepaidCreditRemainingCents", "creditBalanceCents"]))
+            ?? JSONValue.number(JSONValue.value(prepaid, names: ["remainingCents", "balanceCents"]))
+            ?? JSONValue.number(JSONValue.value(dashboard, names: ["prepaidCreditRemainingCents", "creditBalanceCents"]))
+            ?? JSONValue.number(JSONValue.value(planInfo, names: ["prepaidCreditRemainingCents", "creditBalanceCents"]))
+        guard let cents else { return nil }
+        return "余额 " + money(cents)
+    }
+
+    private static func money(_ cents: Double) -> String {
+        let dollars = max(0, cents) / 100
+        if abs(dollars - dollars.rounded()) < 0.001 {
+            return String(format: "$%.0f", dollars.rounded())
         }
-        return String(format: "$%.2f", amount)
+        return String(format: "$%.2f", dollars)
     }
 
     private static func firstDate(_ values: [Any?]) -> Date? {
@@ -502,13 +526,13 @@ enum QuotaParser {
         var parts: [String] = []
         if let limit, limit > 0, looksLikeCents(limit) {
             let usedValue = used ?? (limit - (remaining ?? limit))
-            parts.append(String(format: "$%.2f / $%.2f", usedValue / 100, limit / 100))
+            parts.append(money(usedValue) + " / " + money(limit))
         } else if let request, request.limit > 0 {
             parts.append(String(format: "%.0f / %.0f 次", request.used, request.limit))
         }
         if onDemandEnabled, let onDemandUsed, onDemandUsed > 0 {
             let display = looksLikeCents(onDemandUsed)
-                ? String(format: "按量 $%.2f", onDemandUsed / 100)
+                ? "按量 " + money(onDemandUsed)
                 : String(format: "按量 %.0f", onDemandUsed)
             parts.append(display)
         }
@@ -739,7 +763,6 @@ enum SnapshotCache {
         let sampledAt = JSONValue.date(object["sampledAt"]) ?? .distantPast
         let resetAt = JSONValue.number(object["resetAt"])
         let windowMinutes = JSONValue.number(object["windowMinutes"])
-        let split = JSONValue.number(object["quotaFormatVersion"]) == 3
         let primary = QuotaWindow(
             remaining: JSONValue.number(object["totalRemain"]),
             used: JSONValue.number(object["totalUsed"]),
@@ -748,51 +771,47 @@ enum SnapshotCache {
             badge: remappedBadge(JSONValue.string(object["primaryBadge"]), fallback: "内置"),
             title: JSONValue.string(object["primaryTitle"]) ?? "内置模型剩余",
             detail: JSONValue.string(object["primaryDetail"]),
-            subtitle: split ? JSONValue.string(object["primarySubtitle"]) : nil
+            schedule: JSONValue.string(object["primarySchedule"])
         )
         let secondary = QuotaWindow(
             remaining: JSONValue.number(object["secondaryRemain"]),
             used: JSONValue.number(object["secondaryUsed"]),
-            resetAt: split ? JSONValue.number(object["secondaryResetAt"]) : resetAt,
-            windowMinutes: split ? JSONValue.number(object["secondaryWindowMinutes"]) : windowMinutes,
+            resetAt: JSONValue.string(object["secondarySchedule"]) == nil ? resetAt : nil,
+            windowMinutes: JSONValue.string(object["secondarySchedule"]) == nil ? windowMinutes : nil,
             badge: remappedBadge(JSONValue.string(object["secondaryBadge"]), fallback: "其他"),
             title: JSONValue.string(object["secondaryTitle"]) ?? "其他模型剩余",
             detail: JSONValue.string(object["secondaryDetail"]),
-            subtitle: split ? JSONValue.string(object["secondarySubtitle"]) : nil
+            schedule: JSONValue.string(object["secondarySchedule"])
         )
-        guard primary.remaining != nil || secondary.remaining != nil else { return nil }
-        let weeklyFlag = object["weeklyPool"] as? Bool ?? false
+        guard primary.remaining != nil || secondary.remaining != nil || secondary.detail != nil else { return nil }
         return QuotaSnapshot(
             planType: JSONValue.string(object["planType"]),
+            planNote: JSONValue.string(object["planNote"]),
             primary: primary,
             secondary: secondary,
             sampledAt: sampledAt,
-            sourceName: "cache",
-            weeklyPool: split && weeklyFlag
+            sourceName: "cache"
         )
     }
 
     static func save(_ snapshot: QuotaSnapshot) {
         let object: [String: Any] = [
-            "quotaFormatVersion": 3,
-            "weeklyPool": snapshot.weeklyPool,
             "planType": snapshot.planType as Any,
+            "planNote": snapshot.planNote ?? NSNull(),
             "totalRemain": snapshot.primary.remaining as Any,
             "totalUsed": snapshot.primary.used as Any,
             "primaryBadge": snapshot.primary.badge,
             "primaryTitle": snapshot.primary.title,
             "primaryDetail": snapshot.primary.detail as Any,
-            "primarySubtitle": snapshot.primary.subtitle as Any,
+            "primarySchedule": snapshot.primary.schedule ?? NSNull(),
             "secondaryRemain": snapshot.secondary.remaining as Any,
             "secondaryUsed": snapshot.secondary.used as Any,
             "secondaryBadge": snapshot.secondary.badge,
             "secondaryTitle": snapshot.secondary.title,
             "secondaryDetail": snapshot.secondary.detail as Any,
-            "secondarySubtitle": snapshot.secondary.subtitle as Any,
+            "secondarySchedule": snapshot.secondary.schedule ?? NSNull(),
             "resetAt": snapshot.primary.resetAt as Any,
             "windowMinutes": snapshot.primary.windowMinutes as Any,
-            "secondaryResetAt": snapshot.secondary.resetAt as Any,
-            "secondaryWindowMinutes": snapshot.secondary.windowMinutes as Any,
             "sampledAt": ISO8601DateFormatter().string(from: snapshot.sampledAt),
             "sourceName": snapshot.sourceName
         ]
@@ -949,7 +968,7 @@ final class CursorUsageClient {
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("CursorQuotaPet/1.5", forHTTPHeaderField: "User-Agent")
+        request.setValue("CursorQuotaPet/1.0", forHTTPHeaderField: "User-Agent")
         if connectRPC {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
@@ -1014,46 +1033,10 @@ enum QuotaFormatter {
         return String(format: "%.0f%%", value)
     }
 
-    static func planKey(_ planType: String?) -> String {
-        let raw = (planType ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: "+", with: "plus")
-        let dropped = CharacterSet(charactersIn: "_- ")
-        return raw.unicodeScalars.filter { !dropped.contains($0) }.map(String.init).joined()
-    }
-
     static func planTitle(_ planType: String?) -> String {
         let raw = planType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !raw.isEmpty else { return "Cursor 额度" }
-        let mapped: String
-        switch planKey(raw) {
-        case "pro": mapped = "Pro"
-        case "proplus": mapped = "Pro+"
-        case "plus": mapped = "Plus"
-        case "premium": mapped = "Premium"
-        case "super": mapped = "Super"
-        case "ultra": mapped = "Ultra"
-        case "business": mapped = "Business"
-        case "enterprise": mapped = "Enterprise"
-        case "team", "teams": mapped = "Team"
-        case "free", "hobby": mapped = "Free"
-        case "start": mapped = "Start"
-        default: mapped = raw.capitalized
-        }
-        return "\(mapped) 额度"
-    }
-
-    static func line(_ window: QuotaWindow?, fallback: String) -> String {
-        let badge = (window?.badge.isEmpty == false) ? window!.badge : fallback
-        if let window, window.remaining == nil, let detail = window.detail, !detail.isEmpty {
-            return "\(badge) \(detail)"
-        }
-        return "\(badge) \(percent(window?.remaining))"
-    }
-
-    static func usagePage(weekly: Bool) -> String {
-        weekly ? "https://grok.com/dashboard" : "https://cursor.com/dashboard/usage"
+        return "\(PlanCatalog.display(raw) ?? raw.capitalized) 额度"
     }
 
     static func caption(minutes: Double?, fallback: String) -> String {
@@ -1077,7 +1060,8 @@ enum QuotaFormatter {
         return "将于 \(resetAtFormatter.string(from: Date(timeIntervalSince1970: timestamp))) 重置"
     }
 
-    static func reset(_ timestamp: TimeInterval?) -> String {
+    static func reset(_ timestamp: TimeInterval?, schedule: String? = nil) -> String {
+        if timestamp == nil, let schedule, !schedule.isEmpty { return schedule }
         guard let timestamp else { return "重置时间未知" }
         let seconds = timestamp - Date().timeIntervalSince1970
         if seconds <= 0 { return "窗口已到点，等待刷新" }
@@ -1559,7 +1543,7 @@ private struct QuotaCard: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(window.subtitle ?? QuotaFormatter.reset(window.resetAt))
+                Text(QuotaFormatter.reset(window.resetAt, schedule: window.schedule))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1605,7 +1589,7 @@ struct QuotaView: View {
         badge: "—",
         title: "等待额度数据",
         detail: nil,
-        subtitle: nil
+        schedule: nil
     )
 
     private var currentSnapshot: QuotaSnapshot? {
@@ -1634,9 +1618,11 @@ struct QuotaView: View {
                             .lineLimit(1)
 
                         Text(
-                            QuotaFormatter.resetAt(
-                                currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
-                            ) ?? "重置时间未知"
+                            currentSnapshot?.planNote
+                                ?? QuotaFormatter.resetAt(
+                                    currentSnapshot?.primary.resetAt ?? currentSnapshot?.secondary.resetAt
+                                )
+                                ?? "重置时间未知"
                         )
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -1890,7 +1876,10 @@ final class QuotaStatusView: NSView {
             measuredTextWidth(primaryLabel.stringValue),
             measuredTextWidth(secondaryLabel.stringValue),
             measuredTextWidth("内置 100%"),
-            measuredTextWidth("其他 100%")
+            measuredTextWidth("其他 100%"),
+            measuredTextWidth("本周 100%"),
+            measuredTextWidth("第三方 不含"),
+            measuredTextWidth("预付 按量")
         )
         return ceil(
             Metrics.iconLeading
@@ -1920,8 +1909,8 @@ final class QuotaStatusView: NSView {
     func update(snapshot: QuotaSnapshot?) {
         let primary = snapshot?.primary
         let secondary = snapshot?.secondary
-        primaryLabel.stringValue = QuotaFormatter.line(primary, fallback: "内置")
-        secondaryLabel.stringValue = QuotaFormatter.line(secondary, fallback: "其他")
+        primaryLabel.stringValue = statusLine(primary, fallback: "内置")
+        secondaryLabel.stringValue = statusLine(secondary, fallback: "其他")
         primaryLabel.textColor = statusColor(primary?.remaining)
         secondaryLabel.textColor = statusColor(secondary?.remaining)
         let source: String
@@ -1935,6 +1924,14 @@ final class QuotaStatusView: NSView {
         toolTip = "Cursor 额度 · \(source)"
         needsLayout = true
         needsDisplay = true
+    }
+
+    private func statusLine(_ window: QuotaWindow?, fallback: String) -> String {
+        let badge = window?.badge ?? fallback
+        if window?.remaining == nil, let detail = window?.detail, !detail.isEmpty {
+            return "\(badge) \(detail)"
+        }
+        return "\(badge) \(QuotaFormatter.percent(window?.remaining))"
     }
 
     private func statusColor(_ remaining: Double?) -> NSColor {
@@ -2024,7 +2021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let show = NSMenuItem(title: "显示额度", action: #selector(showPopover), keyEquivalent: "")
         let refresh = NSMenuItem(title: "立即刷新", action: #selector(refreshQuota), keyEquivalent: "")
-        let dashboard = NSMenuItem(title: "打开用量页", action: #selector(openDashboard), keyEquivalent: "")
+        let dashboard = NSMenuItem(title: "打开 Cursor 用量页", action: #selector(openDashboard), keyEquivalent: "")
         let quit = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "")
         [show, refresh, dashboard, NSMenuItem.separator(), quit].forEach { item in
             item.target = self
@@ -2120,8 +2117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDashboard() {
-        let weekly = (model.snapshot ?? model.fallbackSnapshot)?.weeklyPool ?? false
-        if let url = URL(string: QuotaFormatter.usagePage(weekly: weekly)) {
+        if let url = URL(string: "https://cursor.com/dashboard/usage") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -2151,6 +2147,8 @@ func runProbe() -> Int32 {
         let result: [String: Any] = [
             "Status": "ok",
             "PlanType": snapshot.planType as Any,
+            "PlanNote": snapshot.planNote ?? NSNull(),
+            "PrimaryBadge": snapshot.primary.badge,
             "IncludedRemain": snapshot.primary.remaining as Any,
             "OtherRemain": snapshot.secondary.remaining as Any,
             "SecondaryBadge": snapshot.secondary.badge,
@@ -2168,6 +2166,8 @@ func runProbe() -> Int32 {
         let result: [String: Any] = [
             "Status": "ok",
             "PlanType": fallback.planType as Any,
+            "PlanNote": fallback.planNote ?? NSNull(),
+            "PrimaryBadge": fallback.primary.badge,
             "IncludedRemain": fallback.primary.remaining as Any,
             "SecondaryBadge": fallback.secondary.badge,
             "SecondaryRemain": fallback.secondary.remaining as Any,
