@@ -17,6 +17,7 @@ internal sealed class QuotaWindow
     public string Badge;
     public string Title;
     public string Detail;
+    public string Subtitle;
 }
 
 internal sealed class QuotaSnapshot
@@ -26,6 +27,7 @@ internal sealed class QuotaSnapshot
     public QuotaWindow Secondary;
     public DateTime SampledAt;
     public string SourceName;
+    public bool WeeklyPool;
 }
 
 internal static class JsonValue
@@ -269,16 +271,11 @@ internal static class QuotaParser
             JsonValue.Get(summary, "billingCycleEnd"),
             JsonValue.Get(JsonValue.Nested(planInfo, "planInfo"), "billingCycleEnd"),
             JsonValue.Get(planInfo, "billingCycleEnd"));
-        if (!cycleEnd.HasValue && cycleStart.HasValue)
-        {
-            cycleEnd = cycleStart.Value + 30 * 24 * 60 * 60;
-        }
-
-        double? windowMinutes = 30 * 24 * 60;
-        if (cycleStart.HasValue && cycleEnd.HasValue)
-        {
-            windowMinutes = Math.Max(1, (cycleEnd.Value - cycleStart.Value) / 60.0);
-        }
+        double? weeklyReset = FirstDate(
+            JsonValue.Get(JsonValue.Nested(planInfo, "planInfo"), "includedUsageResetsAt"),
+            JsonValue.Get(planInfo, "includedUsageResetsAt"),
+            JsonValue.Get(summary, "includedUsageResetsAt"),
+            JsonValue.Get(dashboard, "includedUsageResetsAt"));
 
         string planType = JsonValue.Text(JsonValue.Get(JsonValue.Nested(planInfo, "planInfo"), "planName"));
         if (planType == null)
@@ -298,47 +295,260 @@ internal static class QuotaParser
             planType = localPlan;
         }
 
-        // Each model pool has its own limit. The legacy monetary allowance can
-        // be exhausted while the Cursor Models pool still has usage remaining.
-        bool quotaIsAllowance = !autoUsed.HasValue && allowanceRemaining.HasValue;
-        double? primaryRemaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
-        double? primaryUsed = quotaIsAllowance
-            ? allowanceUsed
-            : (builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null));
-        if (!primaryRemaining.HasValue && !otherUsed.HasValue && !hasBucket)
+        string planKey = QuotaFormatter.PlanKey(planType);
+        bool cycleWeekly = IsWeekCycle(cycleStart, cycleEnd);
+        bool weekly = PeriodIsWeekly(JsonValue.Get(JsonValue.Nested(planInfo, "planInfo"), "includedUsagePeriod"))
+            || PeriodIsWeekly(JsonValue.Get(planInfo, "includedUsagePeriod"))
+            || PeriodIsWeekly(JsonValue.Get(summary, "includedUsagePeriod"))
+            || PeriodIsWeekly(JsonValue.Get(dashboard, "includedUsagePeriod"))
+            || cycleWeekly
+            || planKey == "plus"
+            || planKey == "premium"
+            || planKey == "super";
+
+        double? usageStart = cycleStart;
+        double? usageEnd = cycleEnd;
+        if (weekly && !cycleWeekly)
+        {
+            if (weeklyReset.HasValue)
+            {
+                usageEnd = weeklyReset;
+                usageStart = weeklyReset.Value - 7 * 24 * 60 * 60;
+            }
+            else
+            {
+                usageStart = null;
+                usageEnd = null;
+            }
+        }
+        if (!usageEnd.HasValue && usageStart.HasValue)
+        {
+            usageEnd = usageStart.Value + (weekly ? 7 : 30) * 24 * 60 * 60;
+        }
+        else if (!weekly && !usageEnd.HasValue && cycleStart.HasValue)
+        {
+            usageEnd = cycleStart.Value + 30 * 24 * 60 * 60;
+        }
+
+        double? windowMinutes;
+        if (usageStart.HasValue && usageEnd.HasValue)
+        {
+            windowMinutes = Math.Max(1, (usageEnd.Value - usageStart.Value) / 60.0);
+        }
+        else if (weekly)
+        {
+            windowMinutes = 7 * 24 * 60;
+        }
+        else
+        {
+            windowMinutes = 30 * 24 * 60;
+        }
+        double? resetAt = weekly ? (weeklyReset ?? usageEnd) : usageEnd;
+
+        bool thirdParty = ThirdPartyIncluded(planKey);
+        QuotaWindow primary = new QuotaWindow();
+        primary.ResetAt = resetAt;
+        primary.WindowMinutes = windowMinutes;
+        if (weekly)
+        {
+            // usage-summary still reports the old monthly pools, often as 0%, while the week is on
+            // GetCurrentPeriodUsage.planUsage. Prefer that payload and ignore the summary percents.
+            Dictionary<string, object> periodUsage = JsonValue.Map(JsonValue.Get(dashboard, "planUsage"));
+            double? weekUsed = FirstPoints(JsonValue.Get(periodUsage, "totalPercentUsed"));
+            if (!weekUsed.HasValue)
+            {
+                weekUsed = FirstPoints(JsonValue.Get(periodUsage, "autoPercentUsed"));
+            }
+            primary.Badge = "周池";
+            primary.Title = "本周额度剩余";
+            primary.Detail = IncludedLabel(planKey, true);
+            if (weekUsed.HasValue)
+            {
+                primary.Used = weekUsed;
+                primary.Remaining = ClampPercent(100.0 - weekUsed.Value);
+            }
+        }
+        else
+        {
+            // Each model pool has its own limit. The legacy monetary allowance can
+            // be exhausted while the Cursor Models pool still has usage remaining.
+            bool quotaIsAllowance = !autoUsed.HasValue && allowanceRemaining.HasValue;
+            primary.Remaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
+            primary.Used = quotaIsAllowance
+                ? allowanceUsed
+                : (builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null));
+            primary.Badge = quotaIsAllowance ? "额度" : "内置";
+            primary.Title = quotaIsAllowance ? "套餐剩余" : "内置模型剩余";
+            primary.Detail = quotaIsAllowance ? AllowanceDetail(includedSpend, centsRemaining, centsLimit) : IncludedLabel(planKey, false);
+        }
+
+        if (!primary.Remaining.HasValue && !otherUsed.HasValue && !hasBucket && string.IsNullOrEmpty(planType))
         {
             return null;
+        }
+        if (!weekly && !primary.Remaining.HasValue && !otherUsed.HasValue && !hasBucket)
+        {
+            return null;
+        }
+
+        QuotaWindow secondary = new QuotaWindow();
+        if (weekly || !thirdParty)
+        {
+            if (!thirdParty)
+            {
+                secondary.Badge = "第三方";
+                secondary.Title = "第三方模型";
+                secondary.Subtitle = "本档不含";
+                secondary.Detail = "不可用";
+            }
+            else
+            {
+                FillPrepaid(secondary, summary, planUsage);
+            }
+        }
+        else
+        {
+            secondary.ResetAt = resetAt;
+            secondary.WindowMinutes = windowMinutes;
+            secondary.Badge = "其他";
+            secondary.Title = "其他模型剩余";
+            if (otherUsed.HasValue)
+            {
+                secondary.Remaining = Math.Min(100, Math.Max(0, 100 - otherUsed.Value));
+                secondary.Used = otherUsed;
+            }
+            else if (hasBucket && bucketLimit > 0)
+            {
+                double remaining = Math.Min(100, Math.Max(0, (bucketLimit - bucketUsed) / bucketLimit * 100));
+                secondary.Remaining = remaining;
+                secondary.Used = 100 - remaining;
+            }
         }
 
         QuotaSnapshot snapshot = new QuotaSnapshot();
         snapshot.PlanType = planType;
         snapshot.SampledAt = sampledAt;
         snapshot.SourceName = sourceName;
-        snapshot.Primary = new QuotaWindow();
-        snapshot.Primary.Remaining = primaryRemaining;
-        snapshot.Primary.Used = primaryUsed;
-        snapshot.Primary.ResetAt = cycleEnd;
-        snapshot.Primary.WindowMinutes = windowMinutes;
-        snapshot.Primary.Badge = quotaIsAllowance ? "额度" : "内置";
-        snapshot.Primary.Title = quotaIsAllowance ? "套餐剩余" : "内置模型剩余";
-        snapshot.Primary.Detail = quotaIsAllowance ? AllowanceDetail(includedSpend, centsRemaining, centsLimit) : null;
-        snapshot.Secondary = new QuotaWindow();
-        snapshot.Secondary.ResetAt = cycleEnd;
-        snapshot.Secondary.WindowMinutes = windowMinutes;
-        snapshot.Secondary.Badge = "其他";
-        snapshot.Secondary.Title = "其他模型剩余";
-        if (otherUsed.HasValue)
-        {
-            snapshot.Secondary.Remaining = Math.Min(100, Math.Max(0, 100 - otherUsed.Value));
-            snapshot.Secondary.Used = otherUsed;
-        }
-        else if (hasBucket && bucketLimit > 0)
-        {
-            double remaining = Math.Min(100, Math.Max(0, (bucketLimit - bucketUsed) / bucketLimit * 100));
-            snapshot.Secondary.Remaining = remaining;
-            snapshot.Secondary.Used = 100 - remaining;
-        }
+        snapshot.WeeklyPool = weekly;
+        snapshot.Primary = primary;
+        snapshot.Secondary = secondary;
         return snapshot;
+    }
+
+    private static bool IsWeekCycle(double? start, double? end)
+    {
+        if (!start.HasValue || !end.HasValue)
+        {
+            return false;
+        }
+        double days = (end.Value - start.Value) / 86400.0;
+        return days >= 6.0 && days <= 8.0;
+    }
+
+    private static bool PeriodIsWeekly(object value)
+    {
+        if (value == null)
+        {
+            return false;
+        }
+        double? number = JsonValue.Number(value);
+        if (number.HasValue)
+        {
+            return Math.Abs(number.Value - 2.0) < 0.001;
+        }
+        string text = JsonValue.Text(value);
+        if (text == null)
+        {
+            return false;
+        }
+        return text.ToLowerInvariant().IndexOf("week", StringComparison.Ordinal) >= 0;
+    }
+
+    private static bool ThirdPartyIncluded(string planKey)
+    {
+        return planKey != "plus"
+            && planKey != "free"
+            && planKey != "hobby"
+            && planKey != "start"
+            && planKey != "freetrial";
+    }
+
+    private static string IncludedLabel(string planKey, bool weekly)
+    {
+        if (planKey == "free" || planKey == "hobby") return "有限";
+        if (planKey == "start") return "仅内置";
+        if (!weekly) return null;
+        if (planKey == "plus") return "基础周池";
+        if (planKey == "premium") return "4× Plus";
+        if (planKey == "super") return "15× Plus";
+        if (planKey == "ultra") return "50× Plus";
+        if (planKey == "team" || planKey == "teams" || planKey == "business") return "与席位同档";
+        if (planKey == "enterprise") return "企业共享池";
+        return null;
+    }
+
+    private static void FillPrepaid(QuotaWindow window, Dictionary<string, object> summary, Dictionary<string, object> planUsage)
+    {
+        window.Badge = "预付";
+        window.Title = "预付余额";
+        Dictionary<string, object> onDemand = JsonValue.Nested(summary, "individualUsage", "onDemand");
+        double? used = JsonValue.Number(JsonValue.Get(onDemand, "used"));
+        double? limit = JsonValue.Number(JsonValue.Get(onDemand, "limit"));
+        double? remaining = JsonValue.Number(JsonValue.Get(onDemand, "remaining"));
+        object enabledValue = JsonValue.Get(onDemand, "enabled");
+        bool enabled = enabledValue is bool && (bool)enabledValue;
+        if (limit.HasValue && limit.Value > 0 && (enabled || (used.HasValue && used.Value > 0)))
+        {
+            double remainCents = remaining ?? Math.Max(0, limit.Value - (used ?? 0));
+            window.Remaining = ClampPercent(remainCents / limit.Value * 100.0);
+            window.Used = ClampPercent(100.0 - window.Remaining.Value);
+            window.Detail = AllowanceDetail(used, remainCents, limit);
+            window.Subtitle = "本月上限";
+            return;
+        }
+
+        double? balance = ExplicitBalance(summary, planUsage);
+        if (balance.HasValue)
+        {
+            window.Detail = Dollars(Math.Max(0, balance.Value));
+            window.Subtitle = "不随周池重置";
+            return;
+        }
+        if (used.HasValue && used.Value > 0)
+        {
+            window.Detail = "已加量 " + Dollars(used.Value);
+            window.Subtitle = "从预付扣除";
+            return;
+        }
+        window.Detail = "按量计费";
+        window.Subtitle = "从预付扣除";
+    }
+
+    private static double? ExplicitBalance(Dictionary<string, object> summary, Dictionary<string, object> planUsage)
+    {
+        double? direct = JsonValue.Number(JsonValue.Get(
+            summary,
+            "prepaidCreditCents",
+            "prepaidBalanceCents",
+            "creditBalanceCents",
+            "customerBalanceCents",
+            "prepaidCredit",
+            "creditBalance"));
+        if (direct.HasValue)
+        {
+            return direct;
+        }
+        direct = JsonValue.Number(JsonValue.Get(planUsage, "prepaidCreditCents", "creditBalanceCents", "prepaidCredit"));
+        if (direct.HasValue)
+        {
+            return direct;
+        }
+        Dictionary<string, object> prepaid = JsonValue.Nested(summary, "individualUsage", "prepaid");
+        if (prepaid == null)
+        {
+            prepaid = JsonValue.Nested(summary, "individualUsage", "credit");
+        }
+        return JsonValue.Number(JsonValue.Get(prepaid, "remaining", "balance", "cents"));
     }
 
     private static double? FirstDate(params object[] values)
@@ -524,7 +734,36 @@ internal static class QuotaFormatter
     public static string Line(QuotaWindow window, string fallbackBadge)
     {
         string badge = window != null && !string.IsNullOrEmpty(window.Badge) ? window.Badge : fallbackBadge;
+        if (window != null && !window.Remaining.HasValue && !string.IsNullOrEmpty(window.Detail))
+        {
+            return badge + " " + window.Detail;
+        }
         return badge + " " + Percent(window != null ? window.Remaining : (double?)null);
+    }
+
+    public static string PlanKey(string planType)
+    {
+        if (string.IsNullOrEmpty(planType))
+        {
+            return "";
+        }
+        string key = planType.Trim().ToLowerInvariant().Replace("+", "plus");
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < key.Length; i++)
+        {
+            char ch = key[i];
+            if (ch == '_' || ch == '-' || ch == ' ')
+            {
+                continue;
+            }
+            builder.Append(ch);
+        }
+        return builder.ToString();
+    }
+
+    public static string UsagePage(bool weekly)
+    {
+        return weekly ? "https://grok.com/dashboard" : "https://cursor.com/dashboard/usage";
     }
 
     public static string ShortNumber(double? value)
@@ -547,15 +786,19 @@ internal static class QuotaFormatter
         {
             return "Cursor 额度";
         }
-        string key = raw.ToLowerInvariant().Replace("_", "");
+        string key = PlanKey(raw);
         string mapped = raw;
         if (key == "pro") mapped = "Pro";
-        else if (key == "proplus" || key == "pro+") mapped = "Pro+";
+        else if (key == "proplus") mapped = "Pro+";
+        else if (key == "plus") mapped = "Plus";
+        else if (key == "premium") mapped = "Premium";
+        else if (key == "super") mapped = "Super";
         else if (key == "ultra") mapped = "Ultra";
         else if (key == "business") mapped = "Business";
         else if (key == "enterprise") mapped = "Enterprise";
-        else if (key == "team") mapped = "Team";
+        else if (key == "team" || key == "teams") mapped = "Team";
         else if (key == "free" || key == "hobby") mapped = "Free";
+        else if (key == "start") mapped = "Start";
         else mapped = Capitalize(raw);
         return mapped + " 额度";
     }
@@ -1506,13 +1749,21 @@ internal static class SnapshotCache
             Dictionary<string, object> map = JsonValue.Map(parsed);
             // Old snapshots used monetary allowance for the primary value.
             // Do not display that value as a model pool after an offline update.
-            if (map == null || JsonValue.Number(JsonValue.Get(map, "quotaFormatVersion")) != 2)
+            double? formatVersion = JsonValue.Number(JsonValue.Get(map, "quotaFormatVersion"));
+            if (map == null || (formatVersion != 2 && formatVersion != 3))
             {
                 return null;
             }
+            bool split = formatVersion == 3;
             QuotaSnapshot snapshot = new QuotaSnapshot();
             snapshot.PlanType = JsonValue.Text(JsonValue.Get(map, "planType"));
             snapshot.SourceName = "cache";
+            snapshot.WeeklyPool = split && JsonValue.Text(JsonValue.Get(map, "weeklyPool")) == "true";
+            object weeklyFlag = JsonValue.Get(map, "weeklyPool");
+            if (weeklyFlag is bool)
+            {
+                snapshot.WeeklyPool = (bool)weeklyFlag;
+            }
             double? sampled = JsonValue.UnixSeconds(JsonValue.Get(map, "sampledAt"));
             snapshot.SampledAt = sampled.HasValue
                 ? new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(sampled.Value)
@@ -1525,14 +1776,18 @@ internal static class SnapshotCache
                 resetAt,
                 windowMinutes,
                 Remap(JsonValue.Text(JsonValue.Get(map, "primaryBadge")), "内置"),
-                JsonValue.Text(JsonValue.Get(map, "primaryTitle")) ?? "内置模型剩余");
+                JsonValue.Text(JsonValue.Get(map, "primaryTitle")) ?? "内置模型剩余",
+                split ? JsonValue.Text(JsonValue.Get(map, "primaryDetail")) : null,
+                split ? JsonValue.Text(JsonValue.Get(map, "primarySubtitle")) : null);
             snapshot.Secondary = Window(
                 JsonValue.Number(JsonValue.Get(map, "secondaryRemain")),
                 JsonValue.Number(JsonValue.Get(map, "secondaryUsed")),
-                resetAt,
-                windowMinutes,
+                split ? JsonValue.Number(JsonValue.Get(map, "secondaryResetAt")) : resetAt,
+                split ? JsonValue.Number(JsonValue.Get(map, "secondaryWindowMinutes")) : windowMinutes,
                 Remap(JsonValue.Text(JsonValue.Get(map, "secondaryBadge")), "其他"),
-                JsonValue.Text(JsonValue.Get(map, "secondaryTitle")) ?? "其他模型剩余");
+                JsonValue.Text(JsonValue.Get(map, "secondaryTitle")) ?? "其他模型剩余",
+                split ? JsonValue.Text(JsonValue.Get(map, "secondaryDetail")) : null,
+                split ? JsonValue.Text(JsonValue.Get(map, "secondarySubtitle")) : null);
             if (!snapshot.Primary.Remaining.HasValue && !snapshot.Secondary.Remaining.HasValue)
             {
                 return null;
@@ -1558,18 +1813,25 @@ internal static class SnapshotCache
             double sampled = (snapshot.SampledAt.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
             StringBuilder json = new StringBuilder();
             json.Append("{\n");
-            json.Append("  \"quotaFormatVersion\": 2,\n");
+            json.Append("  \"quotaFormatVersion\": 3,\n");
+            json.Append("  \"weeklyPool\": ").Append(snapshot.WeeklyPool ? "true" : "false").Append(",\n");
             json.Append("  \"planType\": ").Append(JsonString(snapshot.PlanType)).Append(",\n");
             json.Append("  \"totalRemain\": ").Append(JsonNumber(snapshot.Primary.Remaining)).Append(",\n");
             json.Append("  \"totalUsed\": ").Append(JsonNumber(snapshot.Primary.Used)).Append(",\n");
             json.Append("  \"primaryBadge\": ").Append(JsonString(snapshot.Primary.Badge)).Append(",\n");
             json.Append("  \"primaryTitle\": ").Append(JsonString(snapshot.Primary.Title)).Append(",\n");
+            json.Append("  \"primaryDetail\": ").Append(JsonString(snapshot.Primary.Detail)).Append(",\n");
+            json.Append("  \"primarySubtitle\": ").Append(JsonString(snapshot.Primary.Subtitle)).Append(",\n");
             json.Append("  \"secondaryRemain\": ").Append(JsonNumber(snapshot.Secondary.Remaining)).Append(",\n");
             json.Append("  \"secondaryUsed\": ").Append(JsonNumber(snapshot.Secondary.Used)).Append(",\n");
             json.Append("  \"secondaryBadge\": ").Append(JsonString(snapshot.Secondary.Badge)).Append(",\n");
             json.Append("  \"secondaryTitle\": ").Append(JsonString(snapshot.Secondary.Title)).Append(",\n");
+            json.Append("  \"secondaryDetail\": ").Append(JsonString(snapshot.Secondary.Detail)).Append(",\n");
+            json.Append("  \"secondarySubtitle\": ").Append(JsonString(snapshot.Secondary.Subtitle)).Append(",\n");
             json.Append("  \"resetAt\": ").Append(JsonNumber(snapshot.Primary.ResetAt)).Append(",\n");
             json.Append("  \"windowMinutes\": ").Append(JsonNumber(snapshot.Primary.WindowMinutes)).Append(",\n");
+            json.Append("  \"secondaryResetAt\": ").Append(JsonNumber(snapshot.Secondary.ResetAt)).Append(",\n");
+            json.Append("  \"secondaryWindowMinutes\": ").Append(JsonNumber(snapshot.Secondary.WindowMinutes)).Append(",\n");
             json.Append("  \"sampledAt\": ").Append(JsonNumber(sampled)).Append("\n");
             json.Append("}\n");
             File.WriteAllText(path, json.ToString(), Encoding.UTF8);
@@ -1579,7 +1841,7 @@ internal static class SnapshotCache
         }
     }
 
-    private static QuotaWindow Window(double? remaining, double? used, double? resetAt, double? windowMinutes, string badge, string title)
+    private static QuotaWindow Window(double? remaining, double? used, double? resetAt, double? windowMinutes, string badge, string title, string detail, string subtitle)
     {
         QuotaWindow window = new QuotaWindow();
         window.Remaining = remaining;
@@ -1588,6 +1850,8 @@ internal static class SnapshotCache
         window.WindowMinutes = windowMinutes;
         window.Badge = badge;
         window.Title = title;
+        window.Detail = detail;
+        window.Subtitle = subtitle;
         return window;
     }
 
@@ -1764,7 +2028,7 @@ internal sealed class CursorUsageClient
         request.Timeout = 15000;
         request.ReadWriteTimeout = 15000;
         request.Accept = "application/json";
-        request.UserAgent = "CursorQuotaPet/1.4";
+        request.UserAgent = "CursorQuotaPet/1.5";
         request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
         if (slot.Connect || slot.Method == "POST")
         {

@@ -567,7 +567,9 @@ internal static class DetailPainter
         }
 
         string caption = QuotaFormatter.Caption(window != null ? window.WindowMinutes : (double?)null, window != null ? window.Title : "等待额度数据");
-        string reset = QuotaFormatter.Reset(window != null ? window.ResetAt : (double?)null);
+        string reset = window != null && !string.IsNullOrEmpty(window.Subtitle)
+            ? window.Subtitle
+            : QuotaFormatter.Reset(window != null ? window.ResetAt : (double?)null);
         string percent = QuotaFormatter.Percent(window != null ? window.Remaining : (double?)null);
         string burn = QuotaFormatter.BurnRatePerDay(
             window != null ? window.Used : (double?)null,
@@ -2018,7 +2020,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         ContextMenuStrip menu = new ContextMenuStrip();
         menu.Items.Add("显示额度", null, delegate { ShowPopup(false); });
         menu.Items.Add("立即刷新", null, delegate { RefreshQuota(); });
-        menu.Items.Add("打开 Cursor 用量页", null, delegate { OpenDashboard(); });
+        menu.Items.Add("打开用量页", null, delegate { OpenDashboard(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, delegate { Quit(); });
         return menu;
@@ -2269,11 +2271,12 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         _model.Refresh();
     }
 
-    private static void OpenDashboard()
+    private void OpenDashboard()
     {
         try
         {
-            System.Diagnostics.Process.Start("https://cursor.com/dashboard/usage");
+            bool weekly = _model.Display != null && _model.Display.WeeklyPool;
+            System.Diagnostics.Process.Start(QuotaFormatter.UsagePage(weekly));
         }
         catch
         {
