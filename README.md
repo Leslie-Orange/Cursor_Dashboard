@@ -1,10 +1,10 @@
 # Cursor 额度仪表盘
 
-macOS 菜单栏与 Windows 托盘小工具，显示当前 Cursor 账号的限额与额外额度池。
+macOS 菜单栏与 Windows 托盘小工具，显示当前 Cursor 账号的剩余额度。
 
-macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡片按新账户展示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘继续显示内置与其他模型池的两行百分比。Windows 鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`，第二行显示 `预付 按量` 或 `第三方 不含`；旧档显示 `内置 76%` 和 `其他 45%`。macOS 1.5.1 的菜单栏显示主限额和额外额度池的剩余比例，详情卡片显示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘图标显示两行数字；鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
-本工具读取的是 **Cursor 套餐用量**（剩余值、重置时间，以及内置额度和额外额度池），不是 ChatGPT 或 Codex 的限额窗口。
+本工具读取的是 **Cursor 套餐用量**，不是 ChatGPT 或 Codex 的限额窗口。现行 X Subscription 使用每周刷新的 Cursor 模型池；旧档 Pro / Pro+ 等仍使用两个按月刷新的池。
 
 ## 仓库结构
 
@@ -22,9 +22,12 @@ macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 - macOS 1.5.1 详情采用系统原生玻璃材质，旧版 macOS 使用匹配的半透明效果
 - macOS 菜单栏将第二行统一标为「额外」；应用图标与菜单栏标记使用同一套扁平矢量图形
 - macOS 1.5.1 按套餐周期显示周限额或旧月限额；额外额度池优先显示信用额度余额 / 总额
-- 显示套餐 / 计划名称
-- Windows 显示本周期内置模型池和其他模型池的剩余百分比，与官方的两类用量条对齐
-- 未返回内置模型池比例时，回退到套餐金额额度，并显示已用金额 / 上限
+- Windows 显示套餐 / 计划名称和官方包含额度副标题（例如 Premium 为 `4× Plus · 每周`）
+- Windows 和 macOS 识别相同的现行与旧版套餐档位
+- Windows 现行档位显示本周 Cursor 模型池剩余；Premium 及以上的第二行是第三方预付，Plus 和 Free 标明第三方不含
+- 旧档仍显示内置模型池和其他模型池的剩余百分比
+- Windows 未返回主模型池比例时按接口金额额度回退；macOS 旧月套餐沿用 PR 的金额口径，详见下方专项说明
+- Windows 旧档和企业共享池显示账单周期倒计时；Windows 现行个人档位显示每周重置
 - 显示计费周期重置倒计时
 - 约 30 秒自动刷新；弹窗内或右键可立即刷新
 - 剩余不足时圆环和百分比变黄（≤30%）或变红（≤10%）
@@ -57,15 +60,15 @@ macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 优先使用 Cursor 当前计费周期接口，并合并套餐信息与网页用量摘要：
 
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`  
-  本周期套餐用量（已用金额、额度上限、内置 / 其他模型百分比、周期起止）。
+  本周期套餐用量（已用金额、额度上限、模型池百分比、账单周期）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo`  
   套餐名称、价格、包含额度。
 - `GET https://cursor.com/api/usage-summary`  
-  网页用量摘要（套餐类型、周期、内置 / 其他模型百分比、按量消耗）。
+  网页用量摘要（套餐类型、周期、模型池百分比、按量消耗）。
 - `GET https://api2.cursor.sh/auth/usage`  
-  回退：企业/旧版按「请求次数」计量的分桶用量。
+  回退：旧版按「请求次数」计量的分桶用量。
 - `GET https://api2.cursor.sh/auth/full_stripe_profile`  
-  回退：订阅类型（Pro / Ultra / Team 等）。
+  回退：订阅类型（Free / Plus / Premium / Pro / Ultra / Team 等）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance`
   macOS 1.5.1 只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling`
@@ -77,21 +80,29 @@ macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 
 ### Windows 展示字段
 
-| 位置 | 内容 |
-| --- | --- |
-| 状态栏第一行 | **内置**模型池剩余百分比；缺少模型池数据时回退为**额度** |
-| 状态栏第二行 | **其他**剩余百分比（指定的第三方模型池） |
-| 弹窗标题 | 套餐名称，如 `Pro 额度` |
-| 第一张卡片 | 内置模型池剩余、重置倒计时、消耗速度；金额额度回退时显示已用金额 / 上限 |
-| 第二张卡片 | 其他模型剩余、同一周期的重置倒计时、消耗速度（`x%/天`） |
-| 底部状态 | `实时` 或 `快照`、最近采样时间；过期或出错时附加说明 |
-| 颜色 | 剩余 ≤30% 黄色，≤10% 红色 |
+| 位置 | 现行档位（Free / Plus / Premium / Super / Ultra / Teams） | 旧档（Pro / Pro+ / Teams Standard 等） |
+| --- | --- | --- |
+| 状态栏第一行 | **本周** Cursor 模型池剩余；Free 为 **有限** | **内置**模型池剩余；缺少比例时回退为 **额度** |
+| 状态栏第二行 | Premium 及以上为 **预付**；Plus / Free 为 **第三方 不含** | **其他**模型池剩余 |
+| 弹窗标题 | 套餐名称和官方包含额度，如 `Premium 额度`、`4× Plus · 每周` | 套餐名称，如 `Pro 额度`、`月度双池` |
+| 第一张卡片 | 本周剩余和 `每周重置`；卡片右侧是该档倍数，如 `4× Plus` | 内置模型池剩余、重置倒计时、消耗速度 |
+| 第二张卡片 | 第三方预付。接口若返回余额则显示金额，否则显示 `按量` | 其他模型剩余、同一周期的重置倒计时 |
+| 底部状态 | `实时` 或 `快照`、最近采样时间；过期或出错时附加说明 | 同左 |
+| 颜色 | 剩余 ≤30% 黄色，≤10% 红色 | 同左 |
 
-消耗速度按「本周期已用百分比 ÷ 周期内已过去天数」计算，例如 30 天窗口已过约 3 天、已用 5%，则约为 `1.7%/天`。周期刚开始不足 1 小时时，按 1 小时折算，避免数字被放大。
+Windows 消耗速度只在能确定用量窗口时计算，按「本窗口已用百分比 ÷ 已经过天数」。周期刚开始不足 1 小时时，按 1 小时折算，避免数字被放大。Windows 现行档位的用量按周重置；官方页面没有给出具体的下周重置时刻，因此不把月度账单日当成 Windows 用量重置日。
+
+## 套餐档位与包含额度
+
+档位和包含额度以 2026-10-20 打开的官方页面为准：[定价](https://cursor.com/pricing)、[模型与价格](https://cursor.com/docs/models-and-pricing)、[价格与方案](https://cursor.com/help/account-and-billing/pricing)。现行个人方案是 Free、Plus、Premium、Super、Ultra。包含额度是 Plus 的倍数（Plus 为基础周池，Premium 4×，Super 15×，Ultra 50×），不是已经停用的 premium requests 次数。官方没有公布 Plus 基础池的绝对请求次数或美元上限，Windows 界面不显示这类推测数字。
+
+旧档 Pro、Pro+、Ultra，以及 Teams Standard / Teams Premium，仍可能出现在已有订阅上。它们继续用两个按月重置的池：Cursor Models 和 Other Models。Pro 没有被改名为 Premium；新方案里与它最接近的是 Premium，价格和额度都不同。
+
+Windows 的现行周池和旧月模型池按模型池百分比显示。`autoPercentUsed` 是 Cursor 模型池已用百分比，字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`；Windows 旧档的其他模型池使用 `apiPercentUsed`。Windows 托盘、悬浮提示和详情统一四舍五入为整数百分比。Windows 仅在接口没有返回主模型池比例时，才回退到 `includedSpend / limit`。Windows 现行档位不把 `apiPercentUsed` 当成已包含的「其他模型」额度，因为第三方模型不再包含在周池里。
 
 ## macOS 1.5.1 额度口径
 
-新套餐若 `includedUsagePeriod` 表示 weekly，主卡按当前周期接口的 `100 - planUsage.totalPercentUsed` 显示剩余百分比；不会采用 Auto 独立池字段或旧月度摘要的金额、百分比。没有可信周数据时显示缺失状态。重置时间优先使用 `includedUsageResetsAt`；旧月套餐仍使用月周期字段。主卡标题会显示「周限额」或「月限额」。
+新套餐若 `includedUsagePeriod` 表示 weekly，主卡按当前周期接口的 `100 - planUsage.totalPercentUsed` 显示剩余百分比；不会采用 Auto 独立池字段或旧月度摘要的金额、百分比。没有可信周数据时显示缺失状态。重置时间优先使用 `includedUsageResetsAt`；旧月套餐仍使用月周期字段。主卡标题会显示「周限额」或「月限额」。旧月套餐主卡沿用 PR 的金额口径，优先按接口返回的额度金额计算剩余；只有金额数据缺失时才回退到模型池百分比。
 
 1.5.1 修复了旧月度摘要已用 0 覆盖实际周额度已用 100% 的问题。快照格式升级为 3；旧周快照中的主额度值会等待实时刷新，额外池余额和旧月快照继续兼容。
 
@@ -99,9 +110,9 @@ macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 
 ## Windows 额度口径
 
-Windows 端仍按**当前计费月**展示。根据 [官方模型与额度说明](https://cursor.com/docs/models-and-pricing#usage-pools)，内置模型（Cursor Models）和其他模型（Other Models）各有独立额度池。Windows 第一行优先按 `100 - autoPercentUsed` 计算内置模型池剩余，第二行按 `100 - apiPercentUsed` 计算其他模型池剩余。接口的这些字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`。托盘、悬浮提示和详情统一四舍五入为整数百分比。
+Windows 按套餐档位展示额度。现行方案的主池按周重置；旧档的 Cursor Models 和 Other Models 仍按月分别重置。根据 [官方模型与额度说明](https://cursor.com/docs/models-and-pricing#usage-pools)，Windows 第一行使用 `100 - autoPercentUsed` 计算 Cursor 模型池剩余；旧档第二行按 `100 - apiPercentUsed` 计算其他模型池剩余。接口的这些字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`。托盘、悬浮提示和详情统一四舍五入为整数百分比。
 
-`includedSpend / limit` 是另一种金额额度口径，可能已达到上限，而内置模型池仍有剩余；Windows 仅在接口未返回内置模型池比例时回退到这一口径。macOS 的周限额与额外额度池按上方说明读取和显示。
+`includedSpend / limit` 是另一种金额额度口径，可能已达到上限，而模型池仍有剩余；Windows 仅在接口未返回主模型池比例时回退到这一口径。
 
 ## macOS 安装（推荐）
 
@@ -144,7 +155,10 @@ chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.s
 {
   "IncludedRemain" : 76,
   "OtherRemain" : 55,
+  "PlanNote" : "月度双池",
   "PlanType" : "pro",
+  "PrimaryBadge" : "内置",
+  "SecondaryBadge" : "其他",
   "SourceName" : "cursor-api",
   "Status" : "ok"
 }
@@ -229,17 +243,19 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 
 ## 常见问题
 
-**状态栏一直是「内置 —」**  
+**Windows 状态栏一直是「本周 —」或「内置 —」**
+
 先确认 Cursor 已登录。可运行 `--probe` 查看是「未找到登录态」还是接口报错。登录后等几秒，或右键「立即刷新」。
 
 **提示会话过期 / 未认证**  
 在 Cursor 中重新登录，或按上面步骤更新 `CURSOR_SESSION_TOKEN` / 配置文件。Cookie 和本地 `accessToken` 都会过期。
 
 **数字和官网页不一致**  
-Windows 第一行应对齐官方设置页或用量页中 Cursor Models（内置模型）的剩余比例，第二行对齐 Other Models（其他模型）。金额栏的 `included usage` 与两类模型池可能采用不同上限，不能直接替代模型池剩余。本工具约 30 秒刷新一次；安装更新后请重新启动托盘程序。
+Windows 现行档位的第一行应对齐 Cursor 编辑器设置或 [Cursor 官方用量页](https://cursor.com/dashboard/usage)中的 Cursor 模型周池剩余比例。第二行不是另一个包含额度：Premium 及以上是预付余额或「按量」，Plus / Free 是「不含」。旧档第一行对齐 Cursor Models，第二行对齐 Other Models。金额栏的 `included usage` 不能替代模型池剩余。本工具约 30 秒刷新一次；安装更新后请重新启动托盘程序。
 
-**只有内置、没有其他行**  
-部分套餐（尤其是企业按次计费）不返回其他模型分项。此时第二行会尽量显示请求次数剩余，或保持「—」。
+**Windows 第二行不是百分比**
+
+Plus 和 Free 不包含第三方模型，第二行显示「不含」。Premium、Super、Ultra、Teams 和 Enterprise 的第三方模型按 API 标价从预付额度扣除，第二行显示「按量」或接口返回的余额。只有旧档才会把第二行显示成「其他」百分比。
 
 **是否安全？**  
 令牌只在本机读取，请求只发往 `cursor.com` 与 `api2.cursor.sh`。应用不把令牌写入项目目录或自检输出。请不要把 `session-token` 文件或环境变量提交到 git。

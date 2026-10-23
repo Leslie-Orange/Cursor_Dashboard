@@ -15,10 +15,12 @@ struct QuotaWindow {
     let remainingAmountCents: Double?
     let limitAmountCents: Double?
     let currencyCode: String?
+    let schedule: String?
 
     init(remaining: Double?, used: Double?, resetAt: TimeInterval?, windowMinutes: Double?,
          badge: String, title: String, detail: String?, remainingAmountCents: Double? = nil,
-         limitAmountCents: Double? = nil, currencyCode: String? = nil) {
+         limitAmountCents: Double? = nil, currencyCode: String? = nil,
+         schedule: String? = nil) {
         self.remaining = remaining
         self.used = used
         self.resetAt = resetAt
@@ -29,15 +31,27 @@ struct QuotaWindow {
         self.remainingAmountCents = remainingAmountCents
         self.limitAmountCents = limitAmountCents
         self.currencyCode = currencyCode
+        self.schedule = schedule
     }
 }
 
 struct QuotaSnapshot {
     let planType: String?
+    let planNote: String?
     let primary: QuotaWindow
     let secondary: QuotaWindow
     let sampledAt: Date
     let sourceName: String
+
+    init(planType: String?, planNote: String? = nil, primary: QuotaWindow,
+         secondary: QuotaWindow, sampledAt: Date, sourceName: String) {
+        self.planType = planType
+        self.planNote = planNote
+        self.primary = primary
+        self.secondary = secondary
+        self.sampledAt = sampledAt
+        self.sourceName = sourceName
+    }
 }
 
 enum JSONValue {
@@ -104,6 +118,85 @@ enum JSONValue {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: string)
+    }
+}
+
+enum PlanCatalog {
+    enum Model {
+        case unknown
+        case weekly
+        case legacyDual
+        case legacyCursor
+        case pooled
+    }
+
+    static func key(_ planType: String?) -> String {
+        (planType ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    static func model(_ planType: String?, legacyFlag: Bool) -> Model {
+        let key = key(planType)
+        if key.isEmpty { return .unknown }
+        if key == "hobby" || key == "start" || key == "cursorstart" { return .legacyCursor }
+        if isLegacyDualName(key) { return .legacyDual }
+        if key == "enterprise" { return .pooled }
+        if key == "business" { return .legacyDual }
+        if key == "ultra" || key == "team" || key == "teams" {
+            return legacyFlag ? .legacyDual : .weekly
+        }
+        if isWeeklyName(key) { return .weekly }
+        return .unknown
+    }
+
+    static func display(_ planType: String?) -> String? {
+        switch key(planType) {
+        case "free", "freetrial": return "Free"
+        case "plus": return "Plus"
+        case "premium": return "Premium"
+        case "super": return "Super"
+        case "ultra", "ultralegacy", "legacyultra": return "Ultra"
+        case "hobby": return "Hobby"
+        case "start", "cursorstart": return "Start"
+        case "pro": return "Pro"
+        case "proplus", "pro+": return "Pro+"
+        case "business": return "Business"
+        case "enterprise": return "Enterprise"
+        case "team", "teams": return "Teams"
+        case "teamsstandard", "teamstandard": return "Teams Standard"
+        case "teamspremium", "teampremium": return "Teams Premium"
+        default: return nil
+        }
+    }
+
+    static func note(_ planType: String?, model: Model) -> String? {
+        let key = key(planType)
+        if model == .unknown { return nil }
+        if key == "plus" { return "基础 · 每周" }
+        if key == "premium" { return "4× Plus · 每周" }
+        if key == "super" { return "15× Plus · 每周" }
+        if key == "ultra" && model == .weekly { return "50× Plus · 每周" }
+        if key == "free" || key == "freetrial" || key == "hobby" { return "有限" }
+        if key == "start" || key == "cursorstart" { return "仅内置 · 每月" }
+        if key == "teamspremium" || key == "teampremium" { return "5× Standard · 每月" }
+        if key == "team" || key == "teams" { return model == .weekly ? "按席位 · 每周" : "月度双池" }
+        if key == "enterprise" { return "共享池" }
+        if model == .legacyDual || model == .legacyCursor {
+            return model == .legacyCursor ? "仅内置 · 每月" : "月度双池"
+        }
+        return nil
+    }
+
+    private static func isLegacyDualName(_ key: String) -> Bool {
+        ["pro", "proplus", "pro+", "teamsstandard", "teamstandard", "teamspremium", "teampremium", "ultralegacy", "legacyultra"].contains(key)
+    }
+
+    private static func isWeeklyName(_ key: String) -> Bool {
+        ["free", "freetrial", "plus", "premium", "super", "ultra", "team", "teams"].contains(key)
     }
 }
 
@@ -317,6 +410,9 @@ enum QuotaParser {
 
         return QuotaSnapshot(
             planType: planType,
+            planNote: PlanCatalog.note(planType, model: PlanCatalog.model(
+                planType, legacyFlag: legacyFlag(summary: summary, planInfo: planInfo, stripe: stripe)
+            )),
             primary: primary,
             secondary: secondary,
             sampledAt: sampledAt,
@@ -351,6 +447,29 @@ enum QuotaParser {
         let spent = JSONValue.number(plan?["apiSpend"]) ?? JSONValue.number(summary?["apiSpend"])
         guard let total, let spent, total.isFinite, spent.isFinite else { return nil }
         return total - spent
+    }
+
+    private static func legacyFlag(summary: [String: Any]?, planInfo: [String: Any]?, stripe: [String: Any]?) -> Bool {
+        if isTrue(JSONValue.value(summary, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        if isTrue(JSONValue.value(planInfo, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        if isTrue(JSONValue.nested(planInfo, path: ["planInfo", "isLegacyPlan"])) { return true }
+        if isTrue(JSONValue.value(stripe, names: ["isLegacyPlan", "legacyPlan"])) { return true }
+        let pricing = JSONValue.string(JSONValue.value(summary, names: ["pricingModel", "usageAccounting"]))
+            ?? JSONValue.string(JSONValue.value(stripe, names: ["pricingModel", "usageAccounting"]))
+        return pricing?.lowercased().contains("legacy") == true
+    }
+
+    private static func isTrue(_ value: Any?) -> Bool {
+        if let flag = value as? Bool { return flag }
+        return JSONValue.string(value)?.lowercased() == "true"
+    }
+
+    private static func money(_ cents: Double) -> String {
+        let dollars = max(0, cents) / 100
+        if abs(dollars - dollars.rounded()) < 0.001 {
+            return String(format: "$%.0f", dollars.rounded())
+        }
+        return String(format: "$%.2f", dollars)
     }
 
     private static func firstDate(_ values: [Any?]) -> Date? {
@@ -411,13 +530,13 @@ enum QuotaParser {
         var parts: [String] = []
         if let limit, limit > 0, looksLikeCents(limit) {
             let usedValue = used ?? (limit - (remaining ?? limit))
-            parts.append(String(format: "$%.2f / $%.2f", usedValue / 100, limit / 100))
+            parts.append(money(usedValue) + " / " + money(limit))
         } else if let request, request.limit > 0 {
             parts.append(String(format: "%.0f / %.0f 次", request.used, request.limit))
         }
         if onDemandEnabled, let onDemandUsed, onDemandUsed > 0 {
             let display = looksLikeCents(onDemandUsed)
-                ? String(format: "按量 $%.2f", onDemandUsed / 100)
+                ? "按量 " + money(onDemandUsed)
                 : String(format: "按量 %.0f", onDemandUsed)
             parts.append(display)
         }
@@ -663,24 +782,30 @@ enum SnapshotCache {
             windowMinutes: windowMinutes,
             badge: remappedBadge(JSONValue.string(object["primaryBadge"]), fallback: "内置"),
             title: JSONValue.string(object["primaryTitle"]) ?? "内置模型剩余",
-            detail: legacyWeekly ? nil : JSONValue.string(object["primaryDetail"])
+            detail: legacyWeekly ? nil : JSONValue.string(object["primaryDetail"]),
+            schedule: JSONValue.string(object["primarySchedule"])
         )
         let secondary = QuotaWindow(
             remaining: JSONValue.number(object["secondaryRemain"]),
             used: JSONValue.number(object["secondaryUsed"]),
-            resetAt: object.keys.contains("secondaryResetAt") ? JSONValue.number(object["secondaryResetAt"]) : resetAt,
-            windowMinutes: object.keys.contains("secondaryWindowMinutes") ? JSONValue.number(object["secondaryWindowMinutes"]) : windowMinutes,
+            resetAt: object.keys.contains("secondaryResetAt") ? JSONValue.number(object["secondaryResetAt"])
+                : (JSONValue.string(object["secondarySchedule"]) == nil ? resetAt : nil),
+            windowMinutes: object.keys.contains("secondaryWindowMinutes") ? JSONValue.number(object["secondaryWindowMinutes"])
+                : (JSONValue.string(object["secondarySchedule"]) == nil ? windowMinutes : nil),
             badge: remappedBadge(JSONValue.string(object["secondaryBadge"]), fallback: "其他"),
             title: JSONValue.string(object["secondaryTitle"]) ?? "其他模型剩余",
             detail: JSONValue.string(object["secondaryDetail"]),
             remainingAmountCents: JSONValue.number(object["secondaryRemainingAmountCents"]),
             limitAmountCents: JSONValue.number(object["secondaryLimitAmountCents"]),
-            currencyCode: JSONValue.string(object["secondaryCurrencyCode"])
+            currencyCode: JSONValue.string(object["secondaryCurrencyCode"]),
+            schedule: JSONValue.string(object["secondarySchedule"])
         )
         guard primary.remaining != nil || secondary.remaining != nil
-            || secondary.remainingAmountCents != nil || secondary.limitAmountCents != nil else { return nil }
+            || secondary.remainingAmountCents != nil || secondary.limitAmountCents != nil
+            || secondary.detail != nil else { return nil }
         return QuotaSnapshot(
             planType: JSONValue.string(object["planType"]),
+            planNote: JSONValue.string(object["planNote"]),
             primary: primary,
             secondary: secondary,
             sampledAt: sampledAt,
@@ -692,11 +817,13 @@ enum SnapshotCache {
         let object: [String: Any] = [
             "formatVersion": 3,
             "planType": snapshot.planType as Any,
+            "planNote": snapshot.planNote ?? NSNull(),
             "totalRemain": snapshot.primary.remaining as Any,
             "totalUsed": snapshot.primary.used as Any,
             "primaryBadge": snapshot.primary.badge,
             "primaryTitle": snapshot.primary.title,
             "primaryDetail": snapshot.primary.detail as Any,
+            "primarySchedule": snapshot.primary.schedule ?? NSNull(),
             "secondaryRemain": snapshot.secondary.remaining as Any,
             "secondaryUsed": snapshot.secondary.used as Any,
             "secondaryBadge": snapshot.secondary.badge,
@@ -707,6 +834,7 @@ enum SnapshotCache {
             "secondaryCurrencyCode": snapshot.secondary.currencyCode as Any,
             "secondaryResetAt": snapshot.secondary.resetAt.map { NSNumber(value: $0) } ?? NSNull(),
             "secondaryWindowMinutes": snapshot.secondary.windowMinutes.map { NSNumber(value: $0) } ?? NSNull(),
+            "secondarySchedule": snapshot.secondary.schedule ?? NSNull(),
             "resetAt": snapshot.primary.resetAt as Any,
             "windowMinutes": snapshot.primary.windowMinutes as Any,
             "sampledAt": ISO8601DateFormatter().string(from: snapshot.sampledAt),
@@ -952,18 +1080,7 @@ enum QuotaFormatter {
     static func planTitle(_ planType: String?) -> String {
         let raw = planType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !raw.isEmpty else { return "Cursor 额度" }
-        let mapped: String
-        switch raw.lowercased().replacingOccurrences(of: "_", with: "") {
-        case "pro": mapped = "Pro"
-        case "proplus", "pro+": mapped = "Pro+"
-        case "ultra": mapped = "Ultra"
-        case "business": mapped = "Business"
-        case "enterprise": mapped = "Enterprise"
-        case "team": mapped = "Team"
-        case "free", "hobby": mapped = "Free"
-        default: mapped = raw.capitalized
-        }
-        return "\(mapped) 额度"
+        return "\(PlanCatalog.display(raw) ?? raw.capitalized) 额度"
     }
 
     static func caption(minutes: Double?, fallback: String) -> String {
@@ -987,7 +1104,8 @@ enum QuotaFormatter {
         return "将于 \(resetAtFormatter.string(from: Date(timeIntervalSince1970: timestamp))) 重置"
     }
 
-    static func reset(_ timestamp: TimeInterval?) -> String {
+    static func reset(_ timestamp: TimeInterval?, schedule: String? = nil) -> String {
+        if timestamp == nil, let schedule, !schedule.isEmpty { return schedule }
         guard let timestamp else { return "重置时间未知" }
         let seconds = timestamp - Date().timeIntervalSince1970
         if seconds <= 0 { return "窗口已到点，等待刷新" }
@@ -1724,6 +1842,8 @@ func runProbe() -> Int32 {
         var result: [String: Any] = [
             "Status": "ok",
             "PlanType": snapshot.planType as Any,
+            "PlanNote": snapshot.planNote ?? NSNull(),
+            "PrimaryBadge": snapshot.primary.badge,
             "IncludedRemain": snapshot.primary.remaining as Any,
             "OtherRemain": snapshot.secondary.remaining as Any,
             "SecondaryBadge": snapshot.secondary.badge,
@@ -1742,6 +1862,8 @@ func runProbe() -> Int32 {
         var result: [String: Any] = [
             "Status": "ok",
             "PlanType": fallback.planType as Any,
+            "PlanNote": fallback.planNote ?? NSNull(),
+            "PrimaryBadge": fallback.primary.badge,
             "IncludedRemain": fallback.primary.remaining as Any,
             "SecondaryBadge": fallback.secondary.badge,
             "SecondaryRemain": fallback.secondary.remaining as Any,

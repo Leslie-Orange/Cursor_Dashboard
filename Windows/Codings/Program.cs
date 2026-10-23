@@ -109,7 +109,9 @@ internal static class CursorQuotaPetMain
         json.Append("{\n");
         json.Append("  \"IncludedRemain\": ").Append(JsonNumber(snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null)).Append(",\n");
         json.Append("  \"OtherRemain\": ").Append(JsonNumber(snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null)).Append(",\n");
+        json.Append("  \"PlanNote\": ").Append(snapshot.PlanNote == null ? "null" : "\"" + Escape(snapshot.PlanNote) + "\"").Append(",\n");
         json.Append("  \"PlanType\": ").Append(snapshot.PlanType == null ? "null" : "\"" + Escape(snapshot.PlanType) + "\"").Append(",\n");
+        json.Append("  \"PrimaryBadge\": \"").Append(Escape(snapshot.Primary != null ? snapshot.Primary.Badge : "内置")).Append("\",\n");
         json.Append("  \"SampledAt\": \"").Append(snapshot.SampledAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)).Append("\",\n");
         json.Append("  \"SecondaryBadge\": \"").Append(Escape(snapshot.Secondary != null ? snapshot.Secondary.Badge : "其他")).Append("\",\n");
         json.Append("  \"SourceName\": \"").Append(Escape(snapshot.SourceName)).Append("\",\n");
@@ -201,6 +203,7 @@ internal static class CursorQuotaPetMain
         TestUsagePercentWithoutAmountFields();
         TestAllowanceFallbackWithoutAutoPercent();
         TestSnapshotCache();
+        TestCurrentPlans();
         if (QuotaFormatter.PlanTitle(snapshot.PlanType) != "Pro 额度")
         {
             throw new Exception("plan title " + QuotaFormatter.PlanTitle(snapshot.PlanType));
@@ -245,6 +248,139 @@ internal static class CursorQuotaPetMain
         {
             throw new Exception("malformed cache json should be rejected");
         }
+    }
+
+    private static void TestCurrentPlans()
+    {
+        ExpectPlan("free", "Free 额度", "有限");
+        ExpectPlan("plus", "Plus 额度", "基础 · 每周");
+        ExpectPlan("premium", "Premium 额度", "4× Plus · 每周");
+        ExpectPlan("super", "Super 额度", "15× Plus · 每周");
+        ExpectPlan("ultra", "Ultra 额度", "50× Plus · 每周");
+        ExpectPlan("pro", "Pro 额度", "月度双池");
+        ExpectPlan("pro_plus", "Pro+ 额度", "月度双池");
+        ExpectPlan("teams_premium", "Teams Premium 额度", "5× Standard · 每月");
+        ExpectPlan("enterprise", "Enterprise 额度", "共享池");
+        ExpectPlan("team", "Teams 额度", "按席位 · 每周");
+        if (PlanCatalog.Note("ultra", PlanCatalog.Model("ultra", true)) != "月度双池")
+        {
+            throw new Exception("legacy ultra note");
+        }
+
+        QuotaSnapshot premium = PlanSnapshot("premium", 26, 40, false, null);
+        AssertPrimaryQuota(premium, 26, 74, "本周", "4× Plus", "本周 74%", "premium weekly pool");
+        ExpectText(premium.PlanNote, "4× Plus · 每周", "premium note");
+        ExpectText(premium.Primary.Schedule, "每周重置", "premium schedule");
+        if (premium.Primary.ResetAt.HasValue)
+        {
+            throw new Exception("premium must not use the monthly billing cycle as the usage reset");
+        }
+        ExpectText(premium.Secondary.Badge, "预付", "premium secondary");
+        ExpectText(premium.Secondary.Detail, "按量", "premium prepaid");
+        if (premium.Secondary.Remaining.HasValue)
+        {
+            throw new Exception("premium api percent was treated as an included other pool");
+        }
+        ExpectText(QuotaFormatter.Line(premium.Secondary, "其他"), "预付 按量", "premium line");
+
+        QuotaSnapshot plus = PlanSnapshot("plus", 10, 80, false, null);
+        AssertPrimaryQuota(plus, 10, 90, "本周", "基础", "本周 90%", "plus weekly pool");
+        ExpectText(plus.Secondary.Detail, "不含", "plus third party");
+        ExpectText(QuotaFormatter.Line(plus.Secondary, "其他"), "第三方 不含", "plus line");
+
+        QuotaSnapshot super = PlanSnapshot("super", 15, 1, false, null);
+        AssertPrimaryQuota(super, 15, 85, "本周", "15× Plus", "本周 85%", "super weekly pool");
+        QuotaSnapshot ultra = PlanSnapshot("ultra", 20, 10, false, null);
+        AssertPrimaryQuota(ultra, 20, 80, "本周", "50× Plus", "本周 80%", "ultra weekly pool");
+        ExpectText(ultra.Secondary.Badge, "预付", "ultra secondary");
+
+        QuotaSnapshot legacyUltra = PlanSnapshot("ultra", 20, 10, true, null);
+        AssertPrimaryQuota(legacyUltra, 20, 80, "内置", null, "内置 80%", "legacy ultra");
+        AssertOtherQuota(legacyUltra, 10, 90, "其他 90%", "legacy ultra other");
+        ExpectText(legacyUltra.PlanNote, "月度双池", "legacy ultra note");
+
+        QuotaSnapshot pro = PlanSnapshot("pro", 26, 40, false, null);
+        AssertPrimaryQuota(pro, 26, 74, "内置", null, "内置 74%", "legacy pro");
+        AssertOtherQuota(pro, 40, 60, "其他 60%", "legacy pro other");
+        ExpectText(pro.PlanNote, "月度双池", "legacy pro note");
+        if (!pro.Primary.ResetAt.HasValue)
+        {
+            throw new Exception("legacy pro lost its billing reset");
+        }
+
+        QuotaSnapshot teamsPremium = PlanSnapshot("teams_premium", 5, 6, false, null);
+        AssertPrimaryQuota(teamsPremium, 5, 95, "内置", null, "内置 95%", "legacy teams premium");
+        AssertOtherQuota(teamsPremium, 6, 94, "其他 94%", "legacy teams premium other");
+        ExpectText(teamsPremium.PlanNote, "5× Standard · 每月", "legacy teams premium note");
+
+        QuotaSnapshot free = PlanSnapshot("free", 50, null, false, null);
+        AssertPrimaryQuota(free, 50, 50, "有限", "有限", "有限 50%", "free");
+        ExpectText(free.Secondary.Detail, "不含", "free third party");
+
+        QuotaSnapshot start = PlanSnapshot("start", 12, 9, false, null);
+        AssertPrimaryQuota(start, 12, 88, "内置", null, "内置 88%", "start");
+        ExpectText(start.Secondary.Detail, "不含", "start other pool");
+        ExpectText(start.PlanNote, "仅内置 · 每月", "start note");
+
+        QuotaSnapshot enterprise = PlanSnapshot("enterprise", 30, 4, false, null);
+        AssertPrimaryQuota(enterprise, 30, 70, "共享", null, "共享 70%", "enterprise");
+        ExpectText(enterprise.PlanNote, "共享池", "enterprise note");
+        ExpectText(enterprise.Secondary.Badge, "预付", "enterprise prepaid");
+        if (!enterprise.Primary.ResetAt.HasValue)
+        {
+            throw new Exception("enterprise lost its billing reset");
+        }
+
+        QuotaSnapshot credited = PlanSnapshot("premium", 26, null, false, 1250);
+        ExpectText(credited.Secondary.Detail, "余额 $12.50", "prepaid balance");
+        ExpectText(QuotaFormatter.Line(credited.Secondary, "其他"), "预付 余额 $12.50", "prepaid line");
+    }
+
+    private static void ExpectPlan(string plan, string title, string note)
+    {
+        string actualTitle = QuotaFormatter.PlanTitle(plan);
+        if (actualTitle != title)
+        {
+            throw new Exception("title " + plan + " " + actualTitle);
+        }
+        string actualNote = PlanCatalog.Note(plan, PlanCatalog.Model(plan, false));
+        if (actualNote != note)
+        {
+            throw new Exception("note " + plan + " " + actualNote);
+        }
+    }
+
+    private static void ExpectText(string actual, string expected, string name)
+    {
+        if (actual != expected)
+        {
+            throw new Exception(name + " expected " + expected + " actual " + (actual ?? "null"));
+        }
+    }
+
+    private static QuotaSnapshot PlanSnapshot(string membership, double autoUsed, double? apiUsed, bool legacy, double? creditCents)
+    {
+        Dictionary<string, object> planUsage = new Dictionary<string, object>();
+        planUsage["autoPercentUsed"] = autoUsed;
+        if (apiUsed.HasValue)
+        {
+            planUsage["apiPercentUsed"] = apiUsed.Value;
+        }
+        Dictionary<string, object> dashboard = new Dictionary<string, object>();
+        dashboard["planUsage"] = planUsage;
+        dashboard["billingCycleStart"] = "2026-09-01T00:00:00Z";
+        dashboard["billingCycleEnd"] = "2026-10-01T00:00:00Z";
+        Dictionary<string, object> summary = new Dictionary<string, object>();
+        summary["membershipType"] = membership;
+        if (legacy)
+        {
+            summary["isLegacyPlan"] = true;
+        }
+        if (creditCents.HasValue)
+        {
+            summary["creditBalanceCents"] = creditCents.Value;
+        }
+        return QuotaParser.Snapshot(dashboard, null, summary, null, null, null, DateTime.UtcNow, "cursor-api");
     }
 
     private static void TestLiveAllowance()
