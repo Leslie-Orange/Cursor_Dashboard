@@ -120,7 +120,8 @@ enum QuotaParser {
         creditBalance: [String: Any]? = nil,
         prepaidBilling: [String: Any]? = nil
     ) -> QuotaSnapshot? {
-        let planUsage = JSONValue.dictionary(JSONValue.value(dashboard, names: ["planUsage"]))
+        let dashboardPlan = JSONValue.dictionary(JSONValue.value(dashboard, names: ["planUsage"]))
+        let planUsage = dashboardPlan
             ?? JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "plan"]))
         let summaryPlan = JSONValue.dictionary(JSONValue.nested(summary, path: ["individualUsage", "plan"]))
 
@@ -216,8 +217,15 @@ enum QuotaParser {
         let onDemandUsed = JSONValue.number(JSONValue.value(onDemand, names: ["used"]))
 
         let amounts = extraAmounts(creditBalance: creditBalance, prepaidBilling: prepaidBilling)
-        let quotaIsAllowance = allowance != nil
-        let primaryRemaining = allowance?.remaining ?? builtinRemaining
+        // The website summary can still describe a legacy billing month for weekly plans.
+        // Keep the current-period percentage separate so a stale monthly amount cannot override it.
+        let weeklyUsedPercent = firstPoints([
+            dashboardPlan?["totalPercentUsed"]
+        ])
+        let quotaIsAllowance = !isWeekly && allowance != nil
+        let primaryRemaining = isWeekly
+            ? weeklyUsedPercent.map { clampPercent(100 - $0) }
+            : allowance?.remaining ?? builtinRemaining
         guard primaryRemaining != nil || otherUsedPercent != nil || requestBucket != nil || amounts != nil else {
             return nil
         }
@@ -242,7 +250,8 @@ enum QuotaParser {
 
         let primary = QuotaWindow(
             remaining: primaryRemaining,
-            used: allowance?.used ?? builtinUsedPercent ?? builtinRemaining.map { 100 - $0 },
+            used: isWeekly ? weeklyUsedPercent
+                : allowance?.used ?? builtinUsedPercent ?? builtinRemaining.map { 100 - $0 },
             resetAt: resetAt,
             windowMinutes: windowMinutes,
             badge: isWeekly ? "内置" : (quotaIsAllowance ? "额度" : "内置"),
@@ -643,14 +652,18 @@ enum SnapshotCache {
         let sampledAt = JSONValue.date(object["sampledAt"]) ?? .distantPast
         let resetAt = JSONValue.number(object["resetAt"])
         let windowMinutes = JSONValue.number(object["windowMinutes"])
+        // 1.5.0 could cache a monthly fallback as a weekly percentage. Preserve the extra
+        // balance but wait for a fresh weekly sample before displaying that primary value.
+        let legacyWeekly = windowMinutes == 7 * 24 * 60
+            && (JSONValue.number(object["formatVersion"]) ?? 0) < 3
         let primary = QuotaWindow(
-            remaining: JSONValue.number(object["totalRemain"]),
-            used: JSONValue.number(object["totalUsed"]),
+            remaining: legacyWeekly ? nil : JSONValue.number(object["totalRemain"]),
+            used: legacyWeekly ? nil : JSONValue.number(object["totalUsed"]),
             resetAt: resetAt,
             windowMinutes: windowMinutes,
             badge: remappedBadge(JSONValue.string(object["primaryBadge"]), fallback: "内置"),
             title: JSONValue.string(object["primaryTitle"]) ?? "内置模型剩余",
-            detail: JSONValue.string(object["primaryDetail"])
+            detail: legacyWeekly ? nil : JSONValue.string(object["primaryDetail"])
         )
         let secondary = QuotaWindow(
             remaining: JSONValue.number(object["secondaryRemain"]),
@@ -677,6 +690,7 @@ enum SnapshotCache {
 
     static func encode(_ snapshot: QuotaSnapshot) -> Data? {
         let object: [String: Any] = [
+            "formatVersion": 3,
             "planType": snapshot.planType as Any,
             "totalRemain": snapshot.primary.remaining as Any,
             "totalUsed": snapshot.primary.used as Any,

@@ -83,16 +83,14 @@ hdiutil create \
   -ov -fs HFS+ -format UDRW \
   "$RW_DMG" >/dev/null
 
-MOUNT_DIR="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk '/\/Volumes\//{print $3; exit}')"
-if [[ -z "${MOUNT_DIR:-}" || ! -d "$MOUNT_DIR" ]]; then
-  print -u2 "挂载临时磁盘映像失败。"
-  exit 1
-fi
+MOUNT_DIR="$(mktemp -d /private/tmp/cursor-dmg-mount.XXXXXX)"
 
 cleanup() {
   hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+  rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+hdiutil attach -readwrite -noverify -noautoopen -mountpoint "$MOUNT_DIR" "$RW_DMG" >/dev/null
 
 if command -v SetFile >/dev/null 2>&1; then
   SetFile -a C "$MOUNT_DIR" >/dev/null 2>&1 || true
@@ -102,6 +100,7 @@ set_finder_icon "$MOUNT_DIR" "$ICON_FILE" || true
 
 sync
 hdiutil detach "$MOUNT_DIR" -quiet
+rmdir "$MOUNT_DIR"
 trap - EXIT
 
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$FINAL_DMG" >/dev/null

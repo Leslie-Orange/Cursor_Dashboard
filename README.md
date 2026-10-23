@@ -2,7 +2,7 @@
 
 macOS 菜单栏与 Windows 托盘小工具，显示当前 Cursor 账号的限额与额外额度池。
 
-macOS 1.5.0 的菜单栏显示主限额和额外池的剩余比例；详情卡片按新账户展示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘继续显示内置与其他模型池的两行百分比。Windows 鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+macOS 1.5.1 的菜单栏显示主限额和额外池的剩余比例；详情卡片按新账户展示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘继续显示内置与其他模型池的两行百分比。Windows 鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
 本工具读取的是 **Cursor 套餐用量**（剩余值、重置时间，以及内置额度和额外额度池），不是 ChatGPT 或 Codex 的限额窗口。
 
@@ -19,9 +19,9 @@ macOS 1.5.0 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 ## 功能
 
 - 菜单栏 / 托盘常驻，无需打开主窗口
-- macOS 1.5.0 详情采用系统原生玻璃材质，旧版 macOS 使用匹配的半透明效果
+- macOS 1.5.1 详情采用系统原生玻璃材质，旧版 macOS 使用匹配的半透明效果
 - macOS 菜单栏将第二行统一标为「额外」；应用图标与菜单栏标记使用同一套扁平矢量图形
-- macOS 1.5.0 按套餐周期显示周限额或旧月限额；额外额度池优先显示信用额度余额 / 总额
+- macOS 1.5.1 按套餐周期显示周限额或旧月限额；额外额度池优先显示信用额度余额 / 总额
 - 显示套餐 / 计划名称
 - Windows 显示本周期内置模型池和其他模型池的剩余百分比，与官方的两类用量条对齐
 - 未返回内置模型池比例时，回退到套餐金额额度，并显示已用金额 / 上限
@@ -67,7 +67,7 @@ macOS 1.5.0 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 - `GET https://api2.cursor.sh/auth/full_stripe_profile`  
   回退：订阅类型（Pro / Ultra / Team 等）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance`
-  macOS 1.5.0 只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
+  macOS 1.5.1 只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling`
   没有活动信用额度池时，只读预付额度余额、充值总额与已用金额（`availableCents`、`fundedCents`、`spentCents`）。
 
@@ -89,9 +89,11 @@ macOS 1.5.0 的菜单栏显示主限额和额外池的剩余比例；详情卡�
 
 消耗速度按「本周期已用百分比 ÷ 周期内已过去天数」计算，例如 30 天窗口已过约 3 天、已用 5%，则约为 `1.7%/天`。周期刚开始不足 1 小时时，按 1 小时折算，避免数字被放大。
 
-## macOS 1.5.0 额度口径
+## macOS 1.5.1 额度口径
 
-新套餐若 `includedUsagePeriod` 表示 weekly，主卡显示 7 天周限额百分比，并优先使用 `includedUsageResetsAt` 作为重置时间；旧月套餐仍使用月周期字段。主卡标题会显示「周限额」或「月限额」。
+新套餐若 `includedUsagePeriod` 表示 weekly，主卡按当前周期接口的 `100 - planUsage.totalPercentUsed` 显示剩余百分比；不会采用 Auto 独立池字段或旧月度摘要的金额、百分比。没有可信周数据时显示缺失状态。重置时间优先使用 `includedUsageResetsAt`；旧月套餐仍使用月周期字段。主卡标题会显示「周限额」或「月限额」。
+
+1.5.1 修复了旧月度摘要已用 0 覆盖实际周额度已用 100% 的问题。快照格式升级为 3；旧周快照中的主额度值会等待实时刷新，额外池余额和旧月快照继续兼容。
 
 额外池优先使用信用额度接口的 `creditBalanceCents / totalCents`；没有可用信用额度时回退到预付额度的 `availableCents / fundedCents`。详情卡显示余额 / 额度池总额，状态栏第二行在金额数据可用时显示对应剩余比例。旧月套餐也兼容 `apiLimit - apiSpend` 这组直接金额字段。只有 `apiPercentUsed` 时不会据此推算金额；金额数据缺失时详情显示 `— / —`，额外池不继承主卡的周重置时间。
 
@@ -103,7 +105,7 @@ Windows 端仍按**当前计费月**展示。根据 [官方模型与额度说明
 
 ## macOS 安装（推荐）
 
-1.5.0 安装盘：[Cursor额度仪表盘-1.5.0.dmg](Mac/Packages/Cursor额度仪表盘-1.5.0.dmg)。把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
+1.5.1 安装盘：[Cursor额度仪表盘-1.5.1.dmg](Mac/Packages/Cursor额度仪表盘-1.5.1.dmg)。把 **Cursor额度仪表盘** 拖到 **应用程序** 即可。
 
 这是菜单栏应用：启动后请看屏幕右上角，不会在 Dock 常驻。首次打开若被系统拦截，按住 Control 单击应用并选择「打开」。
 
@@ -114,7 +116,7 @@ chmod +x "./Mac/Codings/pack-dmg.sh"
 ./Mac/Codings/pack-dmg.sh
 ```
 
-会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.5.0.dmg`。
+会生成通用二进制（Apple Silicon + Intel）安装盘：`Mac/Packages/Cursor额度仪表盘-1.5.1.dmg`。
 
 ## macOS 从源码启动
 

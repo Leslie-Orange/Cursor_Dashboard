@@ -13,6 +13,7 @@ struct AppearanceTests {
 
         testMenuPresentationAndWidth()
         testQuotaParserAmountSourcesAndPeriods()
+        testWeeklyQuotaPrecedenceAndUnknown()
         testQuotaSnapshotEncoding()
         testStatusViewHitTestingAndCallbacks()
         testPreviewScenariosAndCacheIsolation()
@@ -104,13 +105,14 @@ struct AppearanceTests {
             "billingCycleStart": monthStart.timeIntervalSince1970,
             "billingCycleEnd": monthEnd.timeIntervalSince1970,
             "planUsage": [
+                "totalPercentUsed": 24.5,
                 "autoPercentUsed": 24.5,
                 "apiPercentUsed": 38.0
             ]
         ]
 
         let weekly = parseFixture(dashboard: weeklyDashboard, planInfo: planInfo)
-        expect(weekly?.primary.remaining == 75.5, "weekly primary quota keeps the included model percentage")
+        expect(weekly?.primary.remaining == 75.5, "weekly primary quota uses the dashboard total percentage")
         expect(weekly?.primary.resetAt == weekReset.timeIntervalSince1970,
                "weekly reset uses includedUsageResetsAt ahead of the monthly billing end")
         expect(weekly?.primary.windowMinutes == 10_080, "weekly plan uses a seven-day window")
@@ -231,6 +233,8 @@ struct AppearanceTests {
                "legacy monthly primary reset continues to use billingCycleEnd")
         expect(monthly?.primary.windowMinutes == 30 * 24 * 60,
                "legacy monthly primary keeps its monthly window")
+        expect(monthly?.primary.remaining == 90 && monthly?.primary.used == 10,
+               "legacy monthly primary still uses the included model percentage")
         expect(QuotaPresentation.cardBadge(window: monthly?.primary, secondary: false) == "月限额",
                "legacy monthly primary card is labeled as a monthly quota")
         expect(monthly?.secondary.remainingAmountCents == 650,
@@ -239,6 +243,112 @@ struct AppearanceTests {
                "legacy apiLimit is preserved as the amount pool total")
         expect(QuotaPresentation.value(monthly?.secondary, secondary: true) == "$6.50 / $10.00",
                "legacy apiSpend/apiLimit fields display as dollars")
+    }
+
+    private static func testWeeklyQuotaPrecedenceAndUnknown() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3 * 86_400)
+        let weeklyPlan: [String: Any] = [
+            "planInfo": [
+                "planName": "Premium",
+                "includedUsagePeriod": "INCLUDED_USAGE_PERIOD_WEEKLY",
+                "includedUsageResetsAt": reset.timeIntervalSince1970
+            ]
+        ]
+        let monthlySummary: [String: Any] = [
+            "individualUsage": [
+                "plan": [
+                    "used": 0,
+                    "limit": 4_615,
+                    "remaining": 4_615,
+                    "totalPercentUsed": 0,
+                    "autoPercentUsed": 0
+                ]
+            ]
+        ]
+
+        let exhaustedDashboard: [String: Any] = [
+            "displayMessage": "You've hit your usage limit",
+            "planUsage": [
+                "autoPercentUsed": 100,
+                "totalPercentUsed": 100,
+                "apiPercentUsed": 0
+            ]
+        ]
+        let exhausted = parseFixture(
+            dashboard: exhaustedDashboard,
+            planInfo: weeklyPlan,
+            summary: monthlySummary
+        )
+        expect(exhausted?.primary.remaining == 0 && exhausted?.primary.used == 100,
+               "weekly dashboard exhaustion takes precedence over a conflicting monthly summary with full balance")
+
+        let totalOverridesAuto = parseFixture(
+            dashboard: ["planUsage": [
+                "totalPercentUsed": 92.25,
+                "autoPercentUsed": 18.5,
+                "apiPercentUsed": 0
+            ]],
+            planInfo: weeklyPlan
+        )
+        expect(totalOverridesAuto?.primary.remaining == 7.75
+               && totalOverridesAuto?.primary.used == 92.25,
+               "weekly total percent used takes precedence over the auto-model percentage")
+
+        let fractionalPoints = parseFixture(
+            dashboard: ["planUsage": ["totalPercentUsed": 0.25]],
+            planInfo: weeklyPlan
+        )
+        expect(fractionalPoints?.primary.remaining == 99.75
+               && fractionalPoints?.primary.used == 0.25,
+               "fractional weekly percentages are interpreted as percentage points")
+
+        let emptyWeeklyDashboard = parseFixture(
+            dashboard: nil,
+            planInfo: weeklyPlan,
+            summary: monthlySummary,
+            creditBalance: [
+                "hasCreditGrants": true,
+                "creditBalanceCents": 21,
+                "totalCents": 500,
+                "usedCents": 479
+            ]
+        )
+        expect(emptyWeeklyDashboard?.primary.remaining == nil
+               && emptyWeeklyDashboard?.primary.used == nil
+               && emptyWeeklyDashboard?.primary.detail == nil,
+               "monthly summary percentages and amounts do not fabricate a weekly dashboard value")
+        expect(emptyWeeklyDashboard?.secondary.remainingAmountCents == 21
+               && emptyWeeklyDashboard?.secondary.limitAmountCents == 500,
+               "a missing weekly primary value does not discard valid credit pool amounts")
+
+        let freshWeekly = parseFixture(
+            dashboard: ["planUsage": [
+                "totalPercentUsed": 0,
+                "includedSpend": 0,
+                "limit": 4_615,
+                "remaining": 4_615
+            ]],
+            planInfo: weeklyPlan
+        )
+        expect(freshWeekly?.primary.remaining == 100 && freshWeekly?.primary.used == 0,
+               "zero weekly usage correctly means 100 percent remaining")
+
+        let autoValueOnly = parseFixture(
+            dashboard: ["planUsage": ["autoPercentUsed": 25]],
+            planInfo: weeklyPlan,
+            creditBalance: ["hasCreditGrants": true, "creditBalanceCents": 21, "totalCents": 500]
+        )
+        expect(autoValueOnly != nil && autoValueOnly?.primary.remaining == nil && autoValueOnly?.primary.used == nil,
+               "weekly auto-pool percentage alone does not fabricate a total quota value")
+
+        let autoMessageOnly = parseFixture(
+            dashboard: ["autoModelSelectedDisplayMessage": "25% used"],
+            planInfo: weeklyPlan,
+            creditBalance: ["hasCreditGrants": true, "creditBalanceCents": 21, "totalCents": 500]
+        )
+        expect(autoMessageOnly != nil && autoMessageOnly?.primary.remaining == nil && autoMessageOnly?.primary.used == nil,
+               "weekly auto display message alone does not fabricate a total quota value")
     }
 
     private static func testQuotaSnapshotEncoding() {
@@ -280,6 +390,82 @@ struct AppearanceTests {
         expect(cacheFingerprint() == before && !FileManager.default.fileExists(atPath: cacheURL.path) == (before == "absent"),
                "pure cache codec does not create or modify the real snapshot cache")
 
+        let exhaustedWeekly = QuotaSnapshot(
+            planType: "premium",
+            primary: QuotaWindow(
+                remaining: 0, used: 100, resetAt: primaryReset, windowMinutes: 10_080,
+                badge: "内置", title: "周限额", detail: "已用 100%"
+            ),
+            secondary: QuotaWindow(
+                remaining: nil, used: nil, resetAt: nil, windowMinutes: nil,
+                badge: "额外", title: "额外额度池", detail: nil,
+                remainingAmountCents: 21, limitAmountCents: 500, currencyCode: "USD"
+            ),
+            sampledAt: sampledAt,
+            sourceName: "cursor-api"
+        )
+        guard let weeklyEncoded = SnapshotCache.encode(exhaustedWeekly),
+              let weeklyObject = try? JSONSerialization.jsonObject(with: weeklyEncoded) as? [String: Any],
+              let weeklyDecoded = SnapshotCache.decode(weeklyEncoded) else {
+            expect(false, "versioned exhausted weekly snapshot encodes and decodes")
+            return
+        }
+        expect((weeklyObject["formatVersion"] as? NSNumber)?.intValue == 3,
+               "new snapshots carry cache format version 3")
+        expect(weeklyDecoded.primary.remaining == 0 && weeklyDecoded.primary.used == 100
+               && weeklyDecoded.primary.detail == "已用 100%",
+               "version 3 weekly cache preserves a genuine zero remaining value")
+
+        let staleWeeklyJSON = """
+        {
+          "planType": "premium",
+          "totalRemain": 100,
+          "totalUsed": 0,
+          "primaryBadge": "内置",
+          "primaryTitle": "周限额",
+          "primaryDetail": "旧缓存误报",
+          "resetAt": 1800259200,
+          "windowMinutes": 10080,
+          "secondaryRemain": 4.2,
+          "secondaryUsed": 95.8,
+          "secondaryRemainingAmountCents": 21,
+          "secondaryLimitAmountCents": 500,
+          "secondaryCurrencyCode": "USD",
+          "sampledAt": "2027-01-15T08:00:00Z"
+        }
+        """
+        for (label, versionField) in [("unversioned", ""), ("version 2", "\"formatVersion\": 2,")] {
+            let legacyWeekly = staleWeeklyJSON.replacingOccurrences(
+                of: "\"planType\": \"premium\",",
+                with: "\"planType\": \"premium\",\n  \(versionField)"
+            )
+            let staleWeekly = SnapshotCache.decode(Data(legacyWeekly.utf8))
+            expect(staleWeekly?.primary.remaining == nil && staleWeekly?.primary.used == nil
+                   && staleWeekly?.primary.detail == nil,
+                   "\(label) weekly cache discards untrusted primary percentage and detail")
+            expect(staleWeekly?.secondary.remainingAmountCents == 21
+                   && staleWeekly?.secondary.limitAmountCents == 500,
+                   "\(label) weekly cache keeps independent extra-pool amounts")
+        }
+
+        let versionTwoMonthlyJSON = """
+        {
+          "formatVersion": 2,
+          "planType": "pro",
+          "totalRemain": 70,
+          "totalUsed": 30,
+          "primaryDetail": "used 30%",
+          "resetAt": 1801000000,
+          "windowMinutes": 43200,
+          "sampledAt": "2027-01-15T08:00:00Z"
+        }
+        """
+        let versionTwoMonthly = SnapshotCache.decode(Data(versionTwoMonthlyJSON.utf8))
+        expect(versionTwoMonthly?.primary.remaining == 70
+               && versionTwoMonthly?.primary.used == 30
+               && versionTwoMonthly?.primary.detail == "used 30%",
+               "version 2 monthly snapshots retain their cached quota values")
+
         let oldCacheJSON = """
         {
           "planType": "pro",
@@ -304,13 +490,14 @@ struct AppearanceTests {
     private static func parseFixture(
         dashboard: [String: Any]?,
         planInfo: [String: Any]?,
+        summary: [String: Any]? = nil,
         creditBalance: [String: Any]? = nil,
         prepaidBilling: [String: Any]? = nil
     ) -> QuotaSnapshot? {
         QuotaParser.snapshot(
             dashboard: dashboard,
             planInfo: planInfo,
-            summary: nil,
+            summary: summary,
             authUsage: nil,
             stripe: nil,
             localPlan: nil,
