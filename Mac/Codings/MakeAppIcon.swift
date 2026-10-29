@@ -1,103 +1,133 @@
 import AppKit
 import Foundation
 
-let outputURL = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "AppIcon.icns")
-let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("CursorQuotaPet.iconset")
-try? FileManager.default.removeItem(at: workDir)
-try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+@main
+struct MakeAppIcon {
+    // ICNS stores each vector-rendered PNG as a typed chunk. The Retina entries
+    // use ic11/ic12/ic13/ic14; the 1x entries use the matching legacy PNG types.
+    private static let iconVariants: [(String, Int, String)] = [
+        ("icon_16x16.png", 16, "icp4"),
+        ("icon_16x16@2x.png", 32, "ic11"),
+        ("icon_32x32.png", 32, "icp5"),
+        ("icon_32x32@2x.png", 64, "ic12"),
+        ("icon_128x128.png", 128, "ic07"),
+        ("icon_128x128@2x.png", 256, "ic13"),
+        ("icon_256x256.png", 256, "ic08"),
+        ("icon_256x256@2x.png", 512, "ic14"),
+        ("icon_512x512.png", 512, "ic09"),
+        ("icon_512x512@2x.png", 1024, "ic10")
+    ]
 
-func drawIcon(size: CGFloat) -> NSImage {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
+    static func main() throws {
+        let codingDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let defaultIconDirectory = codingDirectory.appendingPathComponent("icon", isDirectory: true)
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let pngURL = arguments.indices.contains(0)
+            ? URL(fileURLWithPath: arguments[0])
+            : defaultIconDirectory.appendingPathComponent("app-icon.png")
+        let icnsURL = arguments.indices.contains(1)
+            ? URL(fileURLWithPath: arguments[1])
+            : codingDirectory.appendingPathComponent("AppIcon.icns")
+        let previewDirectory = arguments.indices.contains(2)
+            ? URL(fileURLWithPath: arguments[2], isDirectory: true)
+            : defaultIconDirectory
 
-    let rect = NSRect(x: 0, y: 0, width: size, height: size)
-    let radius = size * 0.223
-    let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-    path.addClip()
-
-    let gradient = NSGradient(colors: [
-        NSColor(red: 0.27, green: 0.49, blue: 0.98, alpha: 1),
-        NSColor(red: 0.38, green: 0.29, blue: 0.90, alpha: 1)
-    ])
-    gradient?.draw(in: rect, angle: -45)
-
-    let highlight = NSBezierPath(ovalIn: NSRect(
-        x: size * 0.12,
-        y: size * 0.52,
-        width: size * 0.62,
-        height: size * 0.46
-    ))
-    NSColor.white.withAlphaComponent(0.18).setFill()
-    highlight.fill()
-
-    let config = NSImage.SymbolConfiguration(pointSize: size * 0.48, weight: .semibold)
-    if let symbol = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: nil)?
-        .withSymbolConfiguration(config) {
-        let symbolSize = symbol.size
-        let symbolRect = NSRect(
-            x: (size - symbolSize.width) / 2,
-            y: (size - symbolSize.height) / 2 - size * 0.02,
-            width: symbolSize.width,
-            height: symbolSize.height
+        try FileManager.default.createDirectory(
+            at: pngURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
         )
-        symbol.isTemplate = true
-        NSGraphicsContext.current?.cgContext.setFillColor(NSColor.white.cgColor)
-        symbol.draw(in: symbolRect, from: .zero, operation: .sourceOver, fraction: 1)
+        try FileManager.default.createDirectory(
+            at: icnsURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(at: previewDirectory, withIntermediateDirectories: true)
+
+        var renderedPNG: [Int: Data] = [:]
+        func pngData(size: Int) throws -> Data {
+            if let data = renderedPNG[size] { return data }
+            let data = try makePNG(size: size)
+            renderedPNG[size] = data
+            return data
+        }
+
+        try pngData(size: 1024).write(to: pngURL)
+        for size in [16, 32, 64, 128, 256, 512] {
+            let previewURL = previewDirectory.appendingPathComponent("app-icon-\(size).png")
+            try pngData(size: size).write(to: previewURL)
+        }
+
+        let chunks = try iconVariants.map { (name, size, type) in
+            (type, try pngData(size: size))
+        }
+        var icns = Data("icns".utf8)
+        let icnsLength = 8 + chunks.reduce(0) { $0 + 8 + $1.1.count }
+        appendUInt32(UInt32(icnsLength), to: &icns)
+        for (type, payload) in chunks {
+            icns.append(contentsOf: type.utf8)
+            appendUInt32(UInt32(payload.count + 8), to: &icns)
+            icns.append(payload)
+        }
+        try icns.write(to: icnsURL)
+
+        print("1024px PNG: \(pngURL.path)")
+        print("ICNS: \(icnsURL.path)")
+        print("Previews: \(previewDirectory.path)")
     }
 
-    image.unlockFocus()
-    return image
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        var bigEndianValue = value.bigEndian
+        withUnsafeBytes(of: &bigEndianValue) { data.append(contentsOf: $0) }
+    }
+
+    private static func makePNG(size: Int) throws -> Data {
+        let pixelSize = NSSize(width: size, height: size)
+        let image = CursorBrand.appIconImage(size: CGFloat(size))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: size,
+            pixelsHigh: size,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            throw IconGenerationError.bitmapCreationFailed(size)
+        }
+
+        bitmap.size = pixelSize
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw IconGenerationError.bitmapContextFailed(size)
+        }
+        context.imageInterpolation = .high
+        NSGraphicsContext.current = context
+        image.draw(
+            in: NSRect(origin: .zero, size: pixelSize),
+            from: NSRect(origin: .zero, size: image.size),
+            operation: .copy,
+            fraction: 1
+        )
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw IconGenerationError.pngEncodingFailed(size)
+        }
+        return data
+    }
 }
 
-func pngData(from image: NSImage, pixelSize: Int) -> Data {
-    let scaleSize = NSSize(width: pixelSize, height: pixelSize)
-    let bitmap = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: pixelSize,
-        pixelsHigh: pixelSize,
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 0
-    )!
-    bitmap.size = scaleSize
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
-    image.draw(in: NSRect(origin: .zero, size: scaleSize))
-    NSGraphicsContext.restoreGraphicsState()
-    return bitmap.representation(using: .png, properties: [:])!
-}
+private enum IconGenerationError: Error, CustomStringConvertible {
+    case bitmapCreationFailed(Int)
+    case bitmapContextFailed(Int)
+    case pngEncodingFailed(Int)
 
-let variants: [(String, Int)] = [
-    ("icon_16x16.png", 16),
-    ("icon_16x16@2x.png", 32),
-    ("icon_32x32.png", 32),
-    ("icon_32x32@2x.png", 64),
-    ("icon_128x128.png", 128),
-    ("icon_128x128@2x.png", 256),
-    ("icon_256x256.png", 256),
-    ("icon_256x256@2x.png", 512),
-    ("icon_512x512.png", 512),
-    ("icon_512x512@2x.png", 1024)
-]
-
-for (name, pixels) in variants {
-    let rendered = drawIcon(size: CGFloat(pixels))
-    let data = pngData(from: rendered, pixelSize: pixels)
-    try data.write(to: workDir.appendingPathComponent(name))
+    var description: String {
+        switch self {
+        case .bitmapCreationFailed(let size): return "无法创建 \(size)px 位图上下文"
+        case .bitmapContextFailed(let size): return "无法初始化 \(size)px 图形上下文"
+        case .pngEncodingFailed(let size): return "无法编码 \(size)px PNG"
+        }
+    }
 }
-
-let process = Process()
-process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-process.arguments = ["-c", "icns", "-o", outputURL.path, workDir.path]
-try process.run()
-process.waitUntilExit()
-guard process.terminationStatus == 0 else {
-    fputs("iconutil 失败\n", stderr)
-    exit(1)
-}
-try? FileManager.default.removeItem(at: workDir)
-print(outputURL.path)
