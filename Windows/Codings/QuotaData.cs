@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -18,6 +18,9 @@ internal sealed class QuotaWindow
     public string Title;
     public string Detail;
     public string Schedule;
+    public double? RemainingAmountCents;
+    public double? LimitAmountCents;
+    public string CurrencyCode;
 }
 
 internal sealed class QuotaSnapshot
@@ -395,9 +398,12 @@ internal static class QuotaParser
         Dictionary<string, object> stripe,
         string localPlan,
         DateTime sampledAt,
-        string sourceName)
+        string sourceName,
+        Dictionary<string, object> creditBalance = null,
+        Dictionary<string, object> prepaidBilling = null)
     {
-        Dictionary<string, object> planUsage = JsonValue.Map(JsonValue.Get(dashboard, "planUsage"));
+        Dictionary<string, object> dashboardPlan = JsonValue.Map(JsonValue.Get(dashboard, "planUsage"));
+        Dictionary<string, object> planUsage = dashboardPlan;
         if (planUsage == null)
         {
             planUsage = JsonValue.Nested(summary, "individualUsage", "plan");
@@ -525,22 +531,25 @@ internal static class QuotaParser
             planType = localPlan;
         }
 
-        // Included usage follows the plan. Current X Subscription plans have one
-        // weekly Cursor-model pool. Legacy Pro / Pro+ / Ultra keep two monthly pools.
-        // A monetary allowance is only a fallback when the pool percent is absent.
-        bool quotaIsAllowance = !autoUsed.HasValue && allowanceRemaining.HasValue;
-        double? primaryRemaining = quotaIsAllowance ? allowanceRemaining : builtinRemaining;
-        double? primaryUsed = quotaIsAllowance
-            ? allowanceUsed
-            : (builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null));
-        if (!primaryRemaining.HasValue && !otherUsed.HasValue && !hasBucket)
-        {
-            return null;
-        }
+        Dictionary<string, object> plan = JsonValue.Nested(planInfo, "planInfo") ?? planInfo;
+        object period = JsonValue.Get(plan, "includedUsagePeriod");
+        string periodName = JsonValue.Text(period) ?? "";
+        bool isWeekly = JsonValue.Number(period) == 2 || periodName.ToUpperInvariant().Contains("WEEKLY");
+        double? includedReset = JsonValue.UnixSeconds(JsonValue.Get(plan, "includedUsageResetsAt"));
+        double? resetAt = isWeekly ? includedReset : (includedReset ?? cycleEnd);
+        if (isWeekly) windowMinutes = 7 * 24 * 60;
+        double? weeklyUsed = FirstPoints(JsonValue.Get(dashboardPlan, "totalPercentUsed"));
+        bool quotaIsAllowance = !isWeekly && allowanceRemaining.HasValue;
+        double? primaryRemaining = isWeekly
+            ? (weeklyUsed.HasValue ? (double?)(100 - weeklyUsed.Value) : null)
+            : (allowanceRemaining ?? builtinRemaining);
+        double? primaryUsed = isWeekly ? weeklyUsed
+            : (allowanceUsed ?? builtinUsed ?? (builtinRemaining.HasValue ? (double?)(100 - builtinRemaining.Value) : null));
+        double? extraRemaining, extraTotal, extraUsed;
+        bool hasExtra = ExtraAmounts(creditBalance, prepaidBilling, out extraRemaining, out extraTotal, out extraUsed);
+        if (!primaryRemaining.HasValue && !otherUsed.HasValue && !hasBucket && !hasExtra) return null;
 
-        bool legacyFlag = LegacyFlag(summary, planInfo, stripe);
-        int planModel = PlanCatalog.Model(planType, legacyFlag);
-        string planKey = PlanCatalog.Key(planType);
+        int planModel = PlanCatalog.Model(planType, LegacyFlag(summary, planInfo, stripe));
         QuotaSnapshot snapshot = new QuotaSnapshot();
         snapshot.PlanType = planType;
         snapshot.PlanNote = PlanCatalog.Note(planType, planModel);
@@ -549,62 +558,79 @@ internal static class QuotaParser
         snapshot.Primary = new QuotaWindow();
         snapshot.Primary.Remaining = primaryRemaining;
         snapshot.Primary.Used = primaryUsed;
-        snapshot.Primary.Detail = quotaIsAllowance ? AllowanceDetail(includedSpend, centsRemaining, centsLimit) : null;
-        if (quotaIsAllowance)
-        {
-            snapshot.Primary.Badge = "额度";
-            snapshot.Primary.Title = "套餐剩余";
-        }
-        else if (planModel == PlanCatalog.Weekly && (planKey == "free" || planKey == "freetrial"))
-        {
-            snapshot.Primary.Badge = "有限";
-            snapshot.Primary.Title = "有限额度";
-        }
-        else if (planModel == PlanCatalog.Weekly)
-        {
-            snapshot.Primary.Badge = "本周";
-            snapshot.Primary.Title = "Cursor 模型剩余";
-        }
-        else if (planModel == PlanCatalog.Pooled)
-        {
-            snapshot.Primary.Badge = "共享";
-            snapshot.Primary.Title = "共享额度剩余";
-        }
-        else
-        {
-            snapshot.Primary.Badge = "内置";
-            snapshot.Primary.Title = "内置模型剩余";
-        }
-        if (planModel == PlanCatalog.Weekly)
-        {
-            snapshot.Primary.Schedule = (planKey == "free" || planKey == "freetrial") ? "有限额度" : "每周重置";
-            if (!quotaIsAllowance)
-            {
-                snapshot.Primary.Detail = PlanCatalog.Allowance(planType, planModel);
-            }
-        }
-        else
-        {
-            snapshot.Primary.ResetAt = cycleEnd;
-            snapshot.Primary.WindowMinutes = windowMinutes;
-        }
-
+        snapshot.Primary.ResetAt = resetAt;
+        snapshot.Primary.WindowMinutes = windowMinutes;
+        snapshot.Primary.Badge = quotaIsAllowance ? "额度" : "内置";
+        snapshot.Primary.Title = isWeekly ? "周限额" : (quotaIsAllowance ? "套餐剩余" : "内置模型剩余");
+        snapshot.Primary.Detail = isWeekly
+            ? (weeklyUsed.HasValue ? "已用 " + weeklyUsed.Value.ToString("0", CultureInfo.InvariantCulture) + "%" : null)
+            : AmountDetail(includedSpend, centsRemaining, centsLimit, hasBucket, bucketUsed, bucketLimit, summary);
         snapshot.Secondary = new QuotaWindow();
-        if (PlanCatalog.IncludesOtherPool(planModel))
+        if (hasExtra)
         {
-            FillIncludedOther(snapshot.Secondary, otherUsed, hasBucket, bucketUsed, bucketLimit, cycleEnd, windowMinutes);
+            snapshot.Secondary.Badge = "其他";
+            snapshot.Secondary.Title = "额外额度池";
+            snapshot.Secondary.RemainingAmountCents = extraRemaining;
+            snapshot.Secondary.LimitAmountCents = extraTotal;
+            snapshot.Secondary.CurrencyCode = "USD";
+            if (extraTotal.HasValue && extraTotal.Value > 0 && extraRemaining.HasValue)
+            {
+                snapshot.Secondary.Remaining = ClampPercent(extraRemaining.Value / extraTotal.Value * 100);
+                snapshot.Secondary.Used = 100 - snapshot.Secondary.Remaining;
+            }
+            if (extraUsed.HasValue) snapshot.Secondary.Detail = "已用 $" + (extraUsed.Value / 100).ToString("0.00", CultureInfo.InvariantCulture);
         }
-        else if (PlanCatalog.ThirdPartyPrepaid(planType, planModel))
+        else if (isWeekly)
         {
-            FillPrepaid(snapshot.Secondary, PrepaidDetail(summary, dashboard, planInfo));
+            snapshot.Secondary.Badge = "其他";
+            snapshot.Secondary.Title = "额外额度池";
+            snapshot.Secondary.Detail = "金额暂不可用";
         }
         else
         {
-            FillExcluded(snapshot.Secondary);
+            FillIncludedOther(snapshot.Secondary, otherUsed, hasBucket, bucketUsed, bucketLimit, resetAt, windowMinutes);
+            if (otherUsed.HasValue)
+            {
+                snapshot.Secondary.Detail = "已用 " + otherUsed.Value.ToString("0", CultureInfo.InvariantCulture) + "%";
+                double? apiLimit = FirstMoney(JsonValue.Get(planUsage, "apiLimit"), JsonValue.Get(summaryPlan, "apiLimit"));
+                double? apiSpend = FirstMoney(JsonValue.Get(planUsage, "apiSpend"), JsonValue.Get(summaryPlan, "apiSpend"));
+                snapshot.Secondary.LimitAmountCents = apiLimit;
+                if (apiLimit.HasValue && apiSpend.HasValue) snapshot.Secondary.RemainingAmountCents = apiLimit - apiSpend;
+                snapshot.Secondary.CurrencyCode = "USD";
+            }
+            else if (hasBucket) snapshot.Secondary.Detail = bucketUsed.ToString("0", CultureInfo.InvariantCulture) + " / " + bucketLimit.ToString("0", CultureInfo.InvariantCulture) + " 次";
         }
         return snapshot;
     }
 
+    private static bool ExtraAmounts(Dictionary<string, object> credit, Dictionary<string, object> prepaid,
+        out double? remaining, out double? total, out double? used)
+    {
+        total = FirstMoney(JsonValue.Get(credit, "totalCents"));
+        remaining = FirstMoney(JsonValue.Get(credit, "creditBalanceCents"));
+        used = FirstMoney(JsonValue.Get(credit, "usedCents"));
+        if ((IsTrue(JsonValue.Get(credit, "hasCreditGrants")) || total.GetValueOrDefault() > 0)
+            && (remaining.HasValue || total.HasValue)) return true;
+        remaining = FirstMoney(JsonValue.Get(prepaid, "availableCents"));
+        total = FirstMoney(JsonValue.Get(prepaid, "fundedCents"));
+        used = FirstMoney(JsonValue.Get(prepaid, "spentCents"));
+        return remaining.HasValue || total.HasValue;
+    }
+
+    private static string AmountDetail(double? spend, double? remaining, double? limit,
+        bool hasBucket, double bucketUsed, double bucketLimit, Dictionary<string, object> summary)
+    {
+        string detail = AllowanceDetail(spend, remaining, limit);
+        if (detail == null && hasBucket) detail = bucketUsed.ToString("0", CultureInfo.InvariantCulture) + " / " + bucketLimit.ToString("0", CultureInfo.InvariantCulture) + " 次";
+        Dictionary<string, object> onDemand = JsonValue.Nested(summary, "individualUsage", "onDemand");
+        double? onDemandUsed = FirstMoney(JsonValue.Get(onDemand, "used"));
+        if (IsTrue(JsonValue.Get(onDemand, "enabled")) && onDemandUsed.GetValueOrDefault() > 0)
+        {
+            string extra = "按量 " + (onDemandUsed.Value >= 100 ? Dollars(onDemandUsed.Value) : onDemandUsed.Value.ToString("0", CultureInfo.InvariantCulture));
+            detail = detail == null ? extra : detail + " · " + extra;
+        }
+        return detail;
+    }
     private static void FillIncludedOther(QuotaWindow window, double? otherUsed, bool hasBucket, double bucketUsed, double bucketLimit, double? cycleEnd, double? windowMinutes)
     {
         window.ResetAt = cycleEnd;
@@ -703,7 +729,7 @@ internal static class QuotaParser
         for (int i = 0; i < values.Length; i++)
         {
             double? number = JsonValue.Number(values[i]);
-            if (number.HasValue)
+            if (number.HasValue && !double.IsNaN(number.Value) && !double.IsInfinity(number.Value))
             {
                 return number;
             }
@@ -1039,12 +1065,13 @@ internal static class QuotaFormatter
             : snapshot.SampledAt.ToLocalTime().ToString(ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm", CultureInfo.InvariantCulture);
         string stale = ageMinutes >= 10 ? " · 可能过期" : "";
         string brief = ShortError(connectionError);
-        string error = snapshot != null && snapshot.SourceName == "cursor-api" || brief.Length == 0 ? "" : " · " + brief;
+        string error = brief.Length == 0 ? "" : " · " + brief;
         if (snapshot == null)
         {
             return brief.Length == 0 ? "正在读取 Cursor 登录态…" : brief;
         }
-        return "更新于 " + stamp + stale + error;
+        return (snapshot.SourceName == "partial" ? "部分数据 "
+            : (brief.Length > 0 || snapshot.SourceName == "cache" ? "快照 " : "更新于 ")) + stamp + stale + error;
     }
 
     public static string ShortError(string error)
@@ -1067,7 +1094,7 @@ internal static class QuotaFormatter
         {
             return "等待";
         }
-        return snapshot.SourceName == "cursor-api" ? "实时" : "快照";
+        return snapshot.SourceName == "partial" ? "部分数据" : (snapshot.SourceName == "cursor-api" ? "实时" : "快照");
     }
 
     private static string Capitalize(string raw)
@@ -1097,6 +1124,28 @@ internal static class QuotaFormatter
 
 internal static class SqliteKv
 {
+    public static Dictionary<string, string> ReadMany(string path, string[] keys)
+    {
+        Dictionary<string, string> values = new Dictionary<string, string>();
+        try
+        {
+            byte[] db = Load(path);
+            if (db == null || db.Length < 100 || Encoding.ASCII.GetString(db, 0, 15) != "SQLite format 3") return values;
+            foreach (string key in keys)
+            {
+                string error;
+                string value = Find(db, key, out error);
+                if (string.IsNullOrEmpty(value)) value = Heuristic(db, key);
+                if (!string.IsNullOrEmpty(value)) values[key] = value.Trim();
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (ArgumentException) { }
+        catch (IndexOutOfRangeException) { }
+        return values;
+    }
+
     public static bool TryRead(string path, string key, out string value, out string error)
     {
         value = null;
@@ -1707,29 +1756,59 @@ internal static class SessionStore
 {
     public static SessionInfo Load()
     {
-        string localPlan = SqliteValue("cursorAuth/stripeMembershipType");
-        SessionInfo best = null;
-        string env = Normalize(Environment.GetEnvironmentVariable("CURSOR_SESSION_TOKEN"));
-        if (env != null)
+        List<SessionInfo> candidates = Candidates();
+        return candidates.Count == 0 ? null : candidates[0];
+    }
+
+    // Keep source priority, but never let a revoked token block a different local login.
+    public static List<SessionInfo> Candidates()
+    {
+        string[] keys = new string[] { "cursorAuth/stripeMembershipType", "cursorAuth/accessToken", "cursorAuth/cachedAccessToken", "cursorAuth/webAccessToken" };
+        Dictionary<string, string> local = SqliteValues(keys);
+        string localPlan = StoredValue(local, keys[0]);
+        List<SessionInfo> candidates = new List<SessionInfo>();
+        AddCandidate(candidates, Environment.GetEnvironmentVariable("CURSOR_SESSION_TOKEN"), "env", localPlan);
+        AddCandidate(candidates, ReadFile(ConfigPath()), "config", localPlan);
+        AddCandidate(candidates, StoredValue(local, keys[1]), "cursor-app", localPlan);
+        AddCandidate(candidates, StoredValue(local, keys[2]), "cursor-app-cache", localPlan);
+        AddCandidate(candidates, StoredValue(local, keys[3]), "cursor-app-web", localPlan);
+        AddCandidate(candidates, ReadAuthJson(), "auth.json", localPlan);
+        List<SessionInfo> ordered = new List<SessionInfo>();
+        foreach (SessionInfo candidate in candidates) if (!JwtExpired(candidate.Token)) ordered.Add(candidate);
+        foreach (SessionInfo candidate in candidates) if (JwtExpired(candidate.Token)) ordered.Add(candidate);
+        return ordered;
+    }
+
+    private static string StoredValue(Dictionary<string, string> values, string key)
+    {
+        string value;
+        return values.TryGetValue(key, out value) ? value : null;
+    }
+
+    private static Dictionary<string, string> SqliteValues(string[] keys)
+    {
+        Dictionary<string, string> values = new Dictionary<string, string>();
+        string[] roots = new string[] { Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) };
+        foreach (string root in roots)
         {
-            best = Prefer(best, Make(env, "env", localPlan));
+            string path = Path.Combine(root, "Cursor", "User", "globalStorage", "state.vscdb");
+            if (!File.Exists(path)) continue;
+            foreach (KeyValuePair<string, string> item in SqliteKv.ReadMany(path, keys))
+                if (!values.ContainsKey(item.Key)) values[item.Key] = item.Value;
+            if (values.Count == keys.Length) break;
         }
-        string file = ReadFile(ConfigPath());
-        if (file != null)
-        {
-            best = Prefer(best, Make(file, "config", localPlan));
-        }
-        string app = FirstSqliteToken("cursorAuth/accessToken", "cursorAuth/cachedAccessToken", "cursorAuth/webAccessToken");
-        if (app != null)
-        {
-            best = Prefer(best, Make(app, "cursor-app", localPlan));
-        }
-        string authJson = ReadAuthJson();
-        if (authJson != null)
-        {
-            best = Prefer(best, Make(authJson, "auth.json", localPlan));
-        }
-        return best;
+        return values;
+    }
+
+    private static void AddCandidate(List<SessionInfo> candidates, string token, string source, string localPlan)
+    {
+        token = Normalize(token);
+        if (token == null) return;
+        token = Normalize(CursorCredentialCodec.Decode(token));
+        if (token == null) return;
+        foreach (SessionInfo existing in candidates)
+            if (BearerToken(existing.Token) == BearerToken(token)) return;
+        candidates.Add(Make(token, source, localPlan));
     }
 
     private static SessionInfo Prefer(SessionInfo current, SessionInfo candidate)
@@ -1786,15 +1865,17 @@ internal static class SessionStore
         {
             return null;
         }
+        string expiredFallback = null;
         for (int i = 0; i < keys.Length; i++)
         {
             string value = SqliteValue(keys[i]);
             if (value != null)
             {
-                return value;
+                if (!JwtExpired(value)) return value;
+                if (expiredFallback == null) expiredFallback = value;
             }
         }
-        return null;
+        return expiredFallback;
     }
 
     private static string ReadAuthJson()
@@ -1829,6 +1910,7 @@ internal static class SessionStore
 
     public static string CookieValue(string token)
     {
+        token = token.Replace("%3a", "%3A");
         if (token.IndexOf("::", StringComparison.Ordinal) >= 0 || token.IndexOf("%3A%3A", StringComparison.Ordinal) >= 0)
         {
             return token.Replace("%3A%3A", "::");
@@ -1843,6 +1925,7 @@ internal static class SessionStore
 
     public static string BearerToken(string token)
     {
+        token = token.Replace("%3a", "%3A");
         int encoded = token.LastIndexOf("%3A%3A", StringComparison.Ordinal);
         if (encoded >= 0)
         {
@@ -1886,19 +1969,18 @@ internal static class SessionStore
 
     private static string ReadFile(string path)
     {
-        if (!File.Exists(path))
+        try
         {
-            return null;
-        }
-        string[] lines = File.ReadAllLines(path);
-        for (int i = 0; i < lines.Length; i++)
-        {
-            string token = Normalize(lines[i]);
-            if (token != null)
+            if (!File.Exists(path)) return null;
+            string[] lines = File.ReadAllLines(path);
+            for (int i = 0; i < lines.Length; i++)
             {
-                return token;
+                string token = Normalize(lines[i]);
+                if (token != null) return token;
             }
         }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
         return null;
     }
 
@@ -1976,9 +2058,8 @@ internal static class SnapshotCache
         {
             object parsed = new JavaScriptSerializer().DeserializeObject(json);
             Dictionary<string, object> map = JsonValue.Map(parsed);
-            // Old snapshots used monetary allowance for the primary value.
-            // Do not display that value as a model pool after an offline update.
-            if (map == null || JsonValue.Number(JsonValue.Get(map, "quotaFormatVersion")) != 2)
+            // v2 used different primary semantics and could label a monthly fallback as weekly.
+            if (map == null || JsonValue.Number(JsonValue.Get(map, "quotaFormatVersion")) != 3)
             {
                 return null;
             }
@@ -2004,13 +2085,17 @@ internal static class SnapshotCache
             snapshot.Secondary = Window(
                 JsonValue.Number(JsonValue.Get(map, "secondaryRemain")),
                 JsonValue.Number(JsonValue.Get(map, "secondaryUsed")),
-                resetAt,
-                windowMinutes,
+                JsonValue.Number(JsonValue.Get(map, "secondaryResetAt")),
+                JsonValue.Number(JsonValue.Get(map, "secondaryWindowMinutes")),
                 Remap(JsonValue.Text(JsonValue.Get(map, "secondaryBadge")), "其他"),
                 JsonValue.Text(JsonValue.Get(map, "secondaryTitle")) ?? "其他模型剩余",
                 JsonValue.Text(JsonValue.Get(map, "secondaryDetail")),
                 JsonValue.Text(JsonValue.Get(map, "secondarySchedule")));
-            if (!snapshot.Primary.Remaining.HasValue && !snapshot.Secondary.Remaining.HasValue)
+            snapshot.Secondary.RemainingAmountCents = JsonValue.Number(JsonValue.Get(map, "secondaryRemainingAmountCents"));
+            snapshot.Secondary.LimitAmountCents = JsonValue.Number(JsonValue.Get(map, "secondaryLimitAmountCents"));
+            snapshot.Secondary.CurrencyCode = JsonValue.Text(JsonValue.Get(map, "secondaryCurrencyCode"));
+            if (!snapshot.Primary.Remaining.HasValue && !snapshot.Secondary.Remaining.HasValue
+                && !snapshot.Secondary.RemainingAmountCents.HasValue && !snapshot.Secondary.LimitAmountCents.HasValue)
             {
                 return null;
             }
@@ -2035,7 +2120,7 @@ internal static class SnapshotCache
             double sampled = (snapshot.SampledAt.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
             StringBuilder json = new StringBuilder();
             json.Append("{\n");
-            json.Append("  \"quotaFormatVersion\": 2,\n");
+            json.Append("  \"quotaFormatVersion\": 3,\n");
             json.Append("  \"planType\": ").Append(JsonString(snapshot.PlanType)).Append(",\n");
             json.Append("  \"planNote\": ").Append(JsonString(snapshot.PlanNote)).Append(",\n");
             json.Append("  \"totalRemain\": ").Append(JsonNumber(snapshot.Primary.Remaining)).Append(",\n");
@@ -2050,6 +2135,11 @@ internal static class SnapshotCache
             json.Append("  \"secondaryTitle\": ").Append(JsonString(snapshot.Secondary.Title)).Append(",\n");
             json.Append("  \"secondaryDetail\": ").Append(JsonString(snapshot.Secondary.Detail)).Append(",\n");
             json.Append("  \"secondarySchedule\": ").Append(JsonString(snapshot.Secondary.Schedule)).Append(",\n");
+            json.Append("  \"secondaryRemainingAmountCents\": ").Append(JsonNumber(snapshot.Secondary.RemainingAmountCents)).Append(",\n");
+            json.Append("  \"secondaryLimitAmountCents\": ").Append(JsonNumber(snapshot.Secondary.LimitAmountCents)).Append(",\n");
+            json.Append("  \"secondaryCurrencyCode\": ").Append(JsonString(snapshot.Secondary.CurrencyCode)).Append(",\n");
+            json.Append("  \"secondaryResetAt\": ").Append(JsonNumber(snapshot.Secondary.ResetAt)).Append(",\n");
+            json.Append("  \"secondaryWindowMinutes\": ").Append(JsonNumber(snapshot.Secondary.WindowMinutes)).Append(",\n");
             json.Append("  \"resetAt\": ").Append(JsonNumber(snapshot.Primary.ResetAt)).Append(",\n");
             json.Append("  \"windowMinutes\": ").Append(JsonNumber(snapshot.Primary.WindowMinutes)).Append(",\n");
             json.Append("  \"sampledAt\": ").Append(JsonNumber(sampled)).Append("\n");
@@ -2094,7 +2184,7 @@ internal static class SnapshotCache
         {
             return "null";
         }
-        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        return new JavaScriptSerializer().Serialize(value);
     }
 
     private static string JsonNumber(double? value)
@@ -2110,7 +2200,8 @@ internal static class SnapshotCache
 internal sealed class CursorUsageClient
 {
     public string CurrentError = "";
-    private bool _inflight;
+    private readonly object _refreshLock = new object();
+    private volatile bool _inflight;
     private bool _pending;
 
     public bool Busy
@@ -2146,11 +2237,11 @@ internal sealed class CursorUsageClient
 
     public QuotaSnapshot RefreshBlocking()
     {
-        if (_inflight)
+        lock (_refreshLock)
         {
-            return null;
+            if (_inflight) return null;
+            _inflight = true;
         }
-        _inflight = true;
         try
         {
             return RefreshOnQueue();
@@ -2163,12 +2254,15 @@ internal sealed class CursorUsageClient
 
     public void RefreshAsync(Control ui, Action<QuotaSnapshot, string> completed)
     {
-        if (_inflight)
+        lock (_refreshLock)
         {
-            _pending = true;
-            return;
+            if (_inflight)
+            {
+                _pending = true;
+                return;
+            }
+            _inflight = true;
         }
-        _inflight = true;
         Thread worker = new Thread(delegate()
         {
             QuotaSnapshot snapshot = null;
@@ -2183,27 +2277,29 @@ internal sealed class CursorUsageClient
                 error = Friendly(ex.Message);
                 CurrentError = error;
             }
-            finally
-            {
-                _inflight = false;
-            }
             QuotaSnapshot captured = snapshot;
             string capturedError = error;
             try
             {
                 ui.BeginInvoke((Action)delegate
                 {
-                    completed(captured, capturedError);
-                    if (_pending)
+                    bool pending;
+                    lock (_refreshLock)
                     {
+                        _inflight = false;
+                        pending = _pending;
                         _pending = false;
+                    }
+                    completed(captured, capturedError);
+                    if (pending)
+                    {
                         RefreshAsync(ui, completed);
                     }
                 });
             }
             catch
             {
-                _inflight = false;
+                lock (_refreshLock) { _inflight = false; _pending = false; }
             }
         });
         worker.IsBackground = true;
@@ -2212,12 +2308,59 @@ internal sealed class CursorUsageClient
 
     private QuotaSnapshot RefreshOnQueue()
     {
-        SessionInfo session = SessionStore.Load();
-        if (session == null)
+        List<SessionInfo> candidates = SessionStore.Candidates();
+        if (candidates.Count == 0)
         {
             CurrentError = "未找到 Cursor 登录态，请先在 Cursor 中登录";
             return null;
         }
+        DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+        QuotaSnapshot partial = null;
+        for (int index = 0; index < candidates.Count; index++)
+        {
+            if (DateTime.UtcNow >= deadline) break;
+            int budget = CandidateBudgetMilliseconds((deadline - DateTime.UtcNow).TotalMilliseconds, candidates.Count - index);
+            DateTime candidateDeadline = DateTime.UtcNow.AddMilliseconds(budget);
+            if (candidateDeadline > deadline) candidateDeadline = deadline;
+            bool unauthorized;
+            QuotaSnapshot snapshot = RefreshSession(candidates[index], candidateDeadline, out unauthorized);
+            if (snapshot != null && snapshot.SourceName != "partial")
+            {
+                SnapshotCache.Save(snapshot);
+                return snapshot;
+            }
+            if (snapshot != null) partial = snapshot;
+            if (!ShouldTryAnotherCandidate(snapshot, unauthorized)) break;
+        }
+        if (partial != null)
+        {
+            CurrentError = "主额度暂不可用，请刷新或检查 Cursor 登录状态";
+            SnapshotCache.Save(partial);
+            return partial;
+        }
+        return null;
+    }
+
+    internal static int CandidateBudgetMilliseconds(double remainingMilliseconds, int candidatesRemaining)
+    {
+        return Math.Max(1, (int)(Math.Max(0, remainingMilliseconds) / Math.Max(1, candidatesRemaining)));
+    }
+
+    internal static bool HasPrimaryData(QuotaSnapshot snapshot)
+    {
+        bool complete = snapshot != null && snapshot.Primary != null && snapshot.Primary.Remaining.HasValue;
+        if (snapshot != null) snapshot.SourceName = complete ? "cursor-api" : "partial";
+        return complete;
+    }
+
+    internal static bool ShouldTryAnotherCandidate(QuotaSnapshot snapshot, bool unauthorized)
+    {
+        return unauthorized && (snapshot == null || snapshot.SourceName == "partial");
+    }
+
+    private QuotaSnapshot RefreshSession(SessionInfo session, DateTime deadline, out bool unauthorized)
+    {
+        unauthorized = false;
         string bearer = SessionStore.BearerToken(session.Token);
         string cookie = SessionStore.CookieValue(session.Token);
         FetchSlot[] slots = new FetchSlot[]
@@ -2228,7 +2371,9 @@ internal sealed class CursorUsageClient
             Slot("GET", "https://api2.cursor.sh/auth/usage", bearer, null, false),
             Slot("GET", "https://api2.cursor.sh/auth/full_stripe_profile", bearer, null, false),
             Slot("POST", "https://cursor.com/api/dashboard/get-current-period-usage", null, cookie, false),
-            Slot("POST", "https://cursor.com/api/dashboard/get-plan-info", null, cookie, false)
+            Slot("POST", "https://cursor.com/api/dashboard/get-plan-info", null, cookie, false),
+            Slot("POST", "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance", bearer, null, true),
+            Slot("POST", "https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling", bearer, null, true)
         };
         CountdownEvent done = new CountdownEvent(slots.Length);
         for (int i = 0; i < slots.Length; i++)
@@ -2239,7 +2384,8 @@ internal sealed class CursorUsageClient
                 FetchSlot item = (FetchSlot)state;
                 try
                 {
-                    Fetch(item);
+                    if (DateTime.UtcNow < deadline) Fetch(item);
+                    else item.Error = "网络请求超时，请稍后重试";
                 }
                 catch (Exception ex)
                 {
@@ -2253,7 +2399,17 @@ internal sealed class CursorUsageClient
             thread.IsBackground = true;
             thread.Start(slot);
         }
-        done.Wait(20000);
+        int waitMilliseconds = Math.Max(1, (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds));
+        if (!done.Wait(waitMilliseconds))
+        {
+            foreach (FetchSlot slot in slots)
+            {
+                HttpWebRequest request = slot.Request;
+                if (request != null) request.Abort();
+            }
+            // Abort releases synchronous request/read waits; retain partial successful data.
+            done.Wait(1000);
+        }
         QuotaSnapshot snapshot = QuotaParser.Snapshot(
             slots[0].Json ?? slots[5].Json,
             slots[1].Json ?? slots[6].Json,
@@ -2262,16 +2418,12 @@ internal sealed class CursorUsageClient
             slots[4].Json,
             session.LocalPlan,
             DateTime.UtcNow,
-            "cursor-api");
+            "cursor-api", slots[7].Json, slots[8].Json);
+        for (int i = 0; i < slots.Length; i++)
+            if (slots[i].StatusCode == 401) unauthorized = true;
         if (snapshot != null)
         {
-            CurrentError = "";
-            SnapshotCache.Save(snapshot);
-            if (Environment.GetEnvironmentVariable("QUOTA_DEBUG") == "1")
-            {
-                Console.WriteLine("DEBUG_PRIMARY_REMAIN=" + snapshot.Primary.Remaining);
-                Console.WriteLine("DEBUG_OTHER_REMAIN=" + snapshot.Secondary.Remaining);
-            }
+            CurrentError = HasPrimaryData(snapshot) ? "" : "主额度暂不可用，请刷新或检查 Cursor 登录状态";
             return snapshot;
         }
         CurrentError = Friendly(FirstError(slots));
@@ -2292,12 +2444,13 @@ internal sealed class CursorUsageClient
     private static void Fetch(FetchSlot slot)
     {
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(slot.Url);
+        slot.Request = request;
         request.Method = slot.Method;
         request.Timeout = 12000;
         request.ReadWriteTimeout = 12000;
         request.KeepAlive = true;
         request.Accept = "application/json";
-        request.UserAgent = "CursorQuotaPet/1.5";
+        request.UserAgent = "CursorQuotaPet/1.5.1";
         request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
         request.ServicePoint.Expect100Continue = false;
         request.ServicePoint.ConnectionLimit = Math.Max(16, request.ServicePoint.ConnectionLimit);
@@ -2347,15 +2500,21 @@ internal sealed class CursorUsageClient
                 }
             }
             int status = (int)response.StatusCode;
+            slot.StatusCode = status;
             string text;
             using (Stream stream = response.GetResponseStream())
             using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
             {
                 text = reader.ReadToEnd();
             }
-            if (status == 401 || status == 403)
+            if (status == 401)
             {
                 slot.Error = "会话已过期，请重新登录 Cursor";
+                return;
+            }
+            if (status == 403)
+            {
+                slot.Error = "接口拒绝访问（HTTP 403），请检查网络或重新登录 Cursor";
                 return;
             }
             if (status >= 400)
@@ -2404,7 +2563,6 @@ internal sealed class CursorUsageClient
         }
         string lower = message.ToLowerInvariant();
         if (lower.IndexOf("401", StringComparison.Ordinal) >= 0
-            || lower.IndexOf("403", StringComparison.Ordinal) >= 0
             || message.IndexOf("过期", StringComparison.Ordinal) >= 0)
         {
             return "会话已过期，请重新登录 Cursor";
@@ -2426,6 +2584,8 @@ internal sealed class CursorUsageClient
         public string Bearer;
         public string Cookie;
         public bool Connect;
+        public int StatusCode;
+        public volatile HttpWebRequest Request;
         public Dictionary<string, object> Json;
         public string Error;
     }
@@ -2446,6 +2606,7 @@ internal sealed class QuotaModel
     private string _iconA = "";
     private string _iconB = "";
     public bool IconChanged;
+    public bool IsRefreshing { get { return _client.Busy; } }
 
     public QuotaModel(Control ui)
     {
@@ -2485,28 +2646,29 @@ internal sealed class QuotaModel
         {
             FooterText = "正在刷新…";
         }
-        Publish(true);
         _client.RefreshAsync(Ui, delegate(QuotaSnapshot snapshot, string error)
         {
             if (snapshot != null)
             {
                 Snapshot = snapshot;
-                ConnectionError = "";
+                ConnectionError = error ?? "";
             }
             else if (!string.IsNullOrEmpty(error))
             {
                 ConnectionError = error;
+                if (Snapshot != null) Snapshot.SourceName = "cache";
             }
             Publish(true);
         });
+        Publish(true);
     }
 
     private void Publish(bool allowIcon)
     {
         QuotaSnapshot display = Display;
-        FooterText = display == null && !string.IsNullOrEmpty(ConnectionError)
-            ? ConnectionError
-            : QuotaFormatter.Footer(display, ConnectionError);
+        FooterText = IsRefreshing ? "正在刷新…"
+            : (display == null && !string.IsNullOrEmpty(ConnectionError)
+                ? ConnectionError : QuotaFormatter.Footer(display, ConnectionError));
         string nextA = QuotaFormatter.ShortNumber(display != null && display.Primary != null ? display.Primary.Remaining : (double?)null);
         string nextB = QuotaFormatter.ShortNumber(display != null && display.Secondary != null ? display.Secondary.Remaining : (double?)null);
         IconChanged = allowIcon && (nextA != _iconA || nextB != _iconB);

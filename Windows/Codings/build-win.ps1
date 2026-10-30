@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -35,6 +35,9 @@ Remove-Item -LiteralPath $iconTool -Force -ErrorAction SilentlyContinue
 $sources = @(
     "Program.cs",
     "QuotaData.cs",
+    "CursorCredentialCodec.cs",
+    "QuotaDataTests.cs",
+    "QuotaPresentation.cs",
     "QuotaUi.cs",
     "AppIcon.cs"
 ) | ForEach-Object { Join-Path $root $_ }
@@ -45,6 +48,7 @@ $sources = @(
     /win32manifest:$manifest `
     /reference:System.dll `
     /reference:System.Core.dll `
+    /reference:System.Security.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
     /reference:System.Web.Extensions.dll `

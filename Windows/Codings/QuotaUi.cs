@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -10,17 +10,17 @@ using System.Windows.Forms;
 
 internal static class GlassTheme
 {
-    public static readonly Color Mint = Color.FromArgb(22, 148, 108);
-    public static readonly Color Slate = Color.FromArgb(36, 48, 62);
-    public static readonly Color SlateMuted = Color.FromArgb(92, 106, 122);
+    public static readonly Color Mint = Color.FromArgb(87, 91, 87);
+    public static readonly Color Slate = Color.FromArgb(32, 34, 33);
+    public static readonly Color SlateMuted = Color.FromArgb(119, 123, 119);
     public static readonly Color Warning = Color.FromArgb(245, 153, 15);
     public static readonly Color Danger = Color.FromArgb(240, 74, 77);
     public const int PanelWidth = 386;
     public const int PanelHeight = 280;
     public const int Shadow = 18;
-    public const int PanelRadius = 30;
-    public const int PanelInset = 14;
-    public const int CardRadius = 16;
+    public const int PanelRadius = 29;
+    public const int PanelInset = 16;
+    public const int CardRadius = 18;
     public const int TipGap = 8;
     public const int HeaderTop = 16;
     public const int ButtonSize = 28;
@@ -41,7 +41,7 @@ internal static class GlassTheme
         {
             return Warning;
         }
-        return Mint;
+        return QuotaColors.IsDark ? Color.FromArgb(230, 231, 226) : Slate;
     }
 }
 
@@ -392,283 +392,6 @@ internal static class ShellTipGuard
         public IntPtr ExcludeA;
         public IntPtr ExcludeB;
         public uint SelfPid;
-    }
-}
-
-internal static class DetailPainter
-{
-    public static Bitmap Render(QuotaSnapshot snapshot, string footer, out Rectangle refresh, out Rectangle close)
-    {
-        return Render(snapshot, footer, DetailLayout.Create(new Rectangle(0, 0, 1920, 1080), 96), false, false, out refresh, out close);
-    }
-
-    public static Bitmap Render(QuotaSnapshot snapshot, string footer, DetailLayout layout, bool refreshHot, bool closeHot, out Rectangle refresh, out Rectangle close)
-    {
-        int width = Math.Max(1, layout.WindowSize.Width);
-        int height = Math.Max(1, layout.WindowSize.Height);
-        Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
-        using (Graphics g = Graphics.FromImage(bitmap))
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.Transparent);
-            g.ScaleTransform(layout.Scale, layout.Scale);
-            Rectangle panel = new Rectangle(GlassTheme.Shadow, GlassTheme.Shadow, GlassTheme.PanelWidth, GlassTheme.PanelHeight);
-            DrawPanel(g, panel);
-            DrawHeader(g, panel, snapshot, out refresh, out close);
-            if (refreshHot) DrawIconButton(g, refresh, true, true);
-            if (closeHot) DrawIconButton(g, close, true, false);
-            QuotaWindow primary = snapshot != null ? snapshot.Primary : Placeholder();
-            QuotaWindow secondary = snapshot != null ? snapshot.Secondary : Placeholder();
-            DrawInsetCards(g, panel, primary, secondary);
-            DrawFooter(g, panel, snapshot, footer);
-        }
-        refresh = layout.ToPixels(refresh);
-        close = layout.ToPixels(close);
-        return bitmap;
-    }
-
-    private static QuotaWindow Placeholder()
-    {
-        QuotaWindow window = new QuotaWindow();
-        window.Badge = "—";
-        window.Title = "等待额度数据";
-        return window;
-    }
-
-    private static void DrawPanel(Graphics g, Rectangle panel)
-    {
-        DrawShadow(g, panel);
-        using (GraphicsPath path = Rounded(panel, GlassTheme.PanelRadius))
-        {
-            using (LinearGradientBrush fill = new LinearGradientBrush(
-                panel,
-                Color.FromArgb(236, 248, 250, 252),
-                Color.FromArgb(228, 236, 240, 246),
-                LinearGradientMode.Vertical))
-            {
-                g.FillPath(fill, path);
-            }
-            using (Pen border = new Pen(Color.FromArgb(42, 20, 28, 40), 1f))
-            {
-                g.DrawPath(border, path);
-            }
-            using (Pen highlight = new Pen(Color.FromArgb(90, Color.White), 1.1f))
-            {
-                g.DrawPath(highlight, path);
-            }
-        }
-    }
-
-    private static void DrawShadow(Graphics g, Rectangle panel)
-    {
-        for (int i = 8; i >= 1; i--)
-        {
-            Rectangle shadow = Rectangle.Inflate(panel, i, i);
-            shadow.Offset(0, Math.Max(1, i / 2));
-            using (GraphicsPath path = Rounded(shadow, GlassTheme.PanelRadius + i))
-            using (SolidBrush brush = new SolidBrush(Color.FromArgb(4 + i, 18, 24, 36)))
-            {
-                g.FillPath(brush, path);
-            }
-        }
-    }
-
-    private static void DrawHeader(Graphics g, Rectangle panel, QuotaSnapshot snapshot, out Rectangle refresh, out Rectangle close)
-    {
-        string title = QuotaFormatter.PlanTitle(snapshot != null ? snapshot.PlanType : null);
-        using (Font font = new Font("Microsoft YaHei UI", 15f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (SolidBrush brush = new SolidBrush(GlassTheme.Slate))
-        {
-            g.DrawString(title, font, brush, panel.X + 20, panel.Y + GlassTheme.HeaderTop);
-        }
-        string reset = snapshot != null && !string.IsNullOrEmpty(snapshot.PlanNote)
-            ? snapshot.PlanNote
-            : QuotaFormatter.ResetAt(snapshot != null && snapshot.Primary != null ? snapshot.Primary.ResetAt : (double?)null);
-        if (string.IsNullOrEmpty(reset))
-        {
-            reset = "重置时间未知";
-        }
-        using (Font font = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (SolidBrush brush = new SolidBrush(GlassTheme.SlateMuted))
-        {
-            g.DrawString(reset, font, brush, panel.X + 20, panel.Y + 36);
-        }
-
-        close = new Rectangle(panel.Right - GlassTheme.ButtonTrailing - GlassTheme.ButtonSize, panel.Y + GlassTheme.HeaderTop, GlassTheme.ButtonSize, GlassTheme.ButtonSize);
-        refresh = new Rectangle(close.X - GlassTheme.ButtonGap - GlassTheme.ButtonSize, close.Y, GlassTheme.ButtonSize, GlassTheme.ButtonSize);
-        DrawIconButton(g, refresh, false, true);
-        DrawIconButton(g, close, false, false);
-    }
-
-    public static void DrawIconButton(Graphics g, Rectangle rect, bool hot, bool refresh)
-    {
-        using (SolidBrush fill = new SolidBrush(hot ? Color.FromArgb(210, 255, 255, 255) : Color.FromArgb(48, 255, 255, 255)))
-        {
-            g.FillEllipse(fill, rect);
-        }
-        using (Pen rim = new Pen(Color.FromArgb(hot ? 70 : 36, 20, 28, 40), 1f))
-        {
-            g.DrawEllipse(rim, rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1f, rect.Height - 1f);
-        }
-        using (Pen mark = new Pen(Color.FromArgb(200, GlassTheme.SlateMuted), 1.55f))
-        {
-            mark.StartCap = LineCap.Round;
-            mark.EndCap = LineCap.Round;
-            if (refresh)
-            {
-                g.DrawArc(mark, rect.X + 7, rect.Y + 7, 14, 14, 40, 280);
-                g.DrawLine(mark, rect.Right - 8, rect.Y + 8, rect.Right - 8, rect.Y + 13);
-            }
-            else
-            {
-                g.DrawLine(mark, rect.X + 9, rect.Y + 9, rect.Right - 9, rect.Bottom - 9);
-                g.DrawLine(mark, rect.Right - 9, rect.Y + 9, rect.X + 9, rect.Bottom - 9);
-            }
-        }
-    }
-
-    private static void DrawInsetCards(Graphics g, Rectangle panel, QuotaWindow primary, QuotaWindow secondary)
-    {
-        Rectangle inset = new Rectangle(panel.X + GlassTheme.PanelInset, panel.Y + 62, panel.Width - GlassTheme.PanelInset * 2, 156);
-        using (GraphicsPath path = Rounded(inset, GlassTheme.CardRadius))
-        using (SolidBrush fill = new SolidBrush(Color.FromArgb(22, 20, 28, 40)))
-        {
-            g.FillPath(fill, path);
-        }
-        using (Pen border = new Pen(Color.FromArgb(20, 20, 28, 40), 1f))
-        using (GraphicsPath path = Rounded(inset, GlassTheme.CardRadius))
-        {
-            g.DrawPath(border, path);
-        }
-
-        int rowHeight = (inset.Height - 1) / 2;
-        DrawCardRow(g, new Rectangle(inset.X, inset.Y, inset.Width, rowHeight), primary);
-        int dividerY = inset.Y + rowHeight;
-        using (Pen divider = new Pen(Color.FromArgb(28, 20, 28, 40), 1f))
-        {
-            g.DrawLine(divider, inset.X + 77, dividerY, inset.Right - 14, dividerY);
-        }
-        DrawCardRow(g, new Rectangle(inset.X, dividerY + 1, inset.Width, inset.Bottom - dividerY - 1), secondary);
-    }
-
-    private static void DrawCardRow(Graphics g, Rectangle rect, QuotaWindow window)
-    {
-        Color tint = GlassTheme.Emphasis(window != null ? window.Remaining : (double?)null);
-        float progress = 0;
-        if (window != null && window.Remaining.HasValue)
-        {
-            progress = (float)(Math.Max(0, Math.Min(100, window.Remaining.Value)) / 100.0);
-        }
-        Rectangle ring = new Rectangle(rect.X + 14, rect.Y + (rect.Height - 50) / 2, 50, 50);
-        using (Pen track = new Pen(Color.FromArgb(36, GlassTheme.Slate), 5.5f))
-        {
-            g.DrawEllipse(track, ring);
-        }
-        if (progress > 0)
-        {
-            using (Pen arc = new Pen(tint, 5.5f))
-            {
-                arc.StartCap = LineCap.Round;
-                arc.EndCap = LineCap.Round;
-                g.DrawArc(arc, ring, -90, -360f * progress);
-            }
-        }
-
-        string badge = window != null && !string.IsNullOrEmpty(window.Badge) ? window.Badge : "—";
-        using (Font font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (SolidBrush brush = new SolidBrush(Color.FromArgb(180, GlassTheme.Slate)))
-        using (StringFormat format = new StringFormat())
-        {
-            format.Alignment = StringAlignment.Center;
-            format.LineAlignment = StringAlignment.Center;
-            g.DrawString(badge, font, brush, ring, format);
-        }
-
-        string caption = QuotaFormatter.Caption(window != null ? window.WindowMinutes : (double?)null, window != null ? window.Title : "等待额度数据");
-        string reset = QuotaFormatter.Reset(window != null ? window.ResetAt : (double?)null);
-        if (window != null && !window.ResetAt.HasValue && !string.IsNullOrEmpty(window.Schedule))
-        {
-            reset = window.Schedule;
-        }
-        string percent = QuotaFormatter.Percent(window != null ? window.Remaining : (double?)null);
-        string burn = QuotaFormatter.BurnRatePerDay(
-            window != null ? window.Used : (double?)null,
-            window != null ? window.Remaining : (double?)null,
-            window != null ? window.ResetAt : (double?)null,
-            window != null ? window.WindowMinutes : (double?)null);
-        string side = window != null && !string.IsNullOrEmpty(window.Detail) ? window.Detail : burn;
-
-        float rightReserve = 96f;
-        RectangleF text = new RectangleF(rect.X + 77, rect.Y + 16, Math.Max(40, rect.Width - 77 - rightReserve), 22);
-        RectangleF sub = new RectangleF(rect.X + 77, rect.Y + 40, Math.Max(40, rect.Width - 77 - rightReserve), 20);
-        using (StringFormat format = new StringFormat())
-        {
-            format.Trimming = StringTrimming.EllipsisCharacter;
-            format.FormatFlags = StringFormatFlags.NoWrap;
-            using (Font titleFont = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (Font mutedFont = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
-            using (SolidBrush titleBrush = new SolidBrush(GlassTheme.Slate))
-            using (SolidBrush mutedBrush = new SolidBrush(GlassTheme.SlateMuted))
-            {
-                g.DrawString(caption, titleFont, titleBrush, text, format);
-                g.DrawString(reset, mutedFont, mutedBrush, sub, format);
-            }
-        }
-
-        using (Font percentFont = new Font("Microsoft YaHei UI", 24f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (Font sideFont = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (SolidBrush percentBrush = new SolidBrush(tint))
-        using (SolidBrush mutedBrush = new SolidBrush(Color.FromArgb(160, GlassTheme.SlateMuted)))
-        using (StringFormat format = new StringFormat())
-        {
-            format.Alignment = StringAlignment.Far;
-            format.LineAlignment = StringAlignment.Near;
-            RectangleF percentBox = new RectangleF(rect.Right - 108, rect.Y + 12, 94, 30);
-            RectangleF sideBox = new RectangleF(rect.Right - 116, rect.Y + 44, 102, 18);
-            g.DrawString(percent, percentFont, percentBrush, percentBox, format);
-            g.DrawString(side, sideFont, mutedBrush, sideBox, format);
-        }
-    }
-
-    private static void DrawFooter(Graphics g, Rectangle panel, QuotaSnapshot snapshot, string footer)
-    {
-        bool live = snapshot != null && snapshot.SourceName == "cursor-api";
-        Color tint = live ? GlassTheme.Mint : GlassTheme.Warning;
-        string badge = QuotaFormatter.StatusBadge(snapshot);
-        int y = panel.Bottom - 28;
-        using (Font font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (Font badgeFont = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (SolidBrush muted = new SolidBrush(GlassTheme.SlateMuted))
-        using (SolidBrush badgeBrush = new SolidBrush(Color.FromArgb(200, GlassTheme.SlateMuted)))
-        using (StringFormat format = new StringFormat())
-        {
-            format.Trimming = StringTrimming.EllipsisCharacter;
-            format.FormatFlags = StringFormatFlags.NoWrap;
-            g.DrawString(footer ?? "", font, muted, new RectangleF(panel.X + 20, y + 2, panel.Width - 108, 16), format);
-            SizeF size = g.MeasureString(badge, badgeFont);
-            float badgeX = panel.Right - size.Width - 20;
-            using (SolidBrush dot = new SolidBrush(tint))
-            {
-                g.FillEllipse(dot, badgeX - 10, y + 6, 6, 6);
-            }
-            g.DrawString(badge, badgeFont, badgeBrush, badgeX, y + 2);
-        }
-    }
-
-    private static GraphicsPath Rounded(Rectangle rect, int radius)
-    {
-        float d = radius * 2f;
-        if (d > rect.Width) d = rect.Width;
-        if (d > rect.Height) d = rect.Height;
-        GraphicsPath path = new GraphicsPath();
-        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
-        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
-        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 }
 
@@ -1150,18 +873,27 @@ internal static class TrayTipPainter
             path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
             path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
             path.CloseFigure();
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(228, 36, 48, 62)))
+            QuotaColors colors = new QuotaColors(QuotaColors.IsDark);
+            using (SolidBrush fill = new SolidBrush(colors.PanelBottom))
             {
                 g.FillPath(fill, path);
             }
-            using (SolidBrush first = new SolidBrush(color1))
-            using (SolidBrush second = new SolidBrush(color2))
+            using (Pen border = new Pen(colors.Border, 1f))
+                g.DrawPath(border, path);
+            using (SolidBrush first = new SolidBrush(TipColor(color1, colors)))
+            using (SolidBrush second = new SolidBrush(TipColor(color2, colors)))
             {
                 g.DrawString(line1, font, first, LeftInset, TopInset);
                 g.DrawString(line2, font, second, LeftInset, TopInset + firstSize.Height - 2f);
             }
         }
         return bitmap;
+    }
+
+    private static Color TipColor(Color color, QuotaColors colors)
+    {
+        return color.ToArgb() == GlassTheme.Warning.ToArgb() || color.ToArgb() == GlassTheme.Danger.ToArgb()
+            ? color : colors.Foreground;
     }
 
     internal static Font CreateFont()
@@ -1173,7 +905,7 @@ internal static class TrayTipPainter
 internal sealed class QuotaTrayTipForm : Form
 {
     private string _line1 = "内置 —";
-    private string _line2 = "其他 —";
+    private string _line2 = "额外 —";
     private Color _color1 = Color.White;
     private Color _color2 = Color.White;
     private readonly Func<Rectangle> _locateTrayIcon;
@@ -1201,7 +933,7 @@ internal sealed class QuotaTrayTipForm : Form
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         Size = _layout.WindowSize;
-        BackColor = Color.FromArgb(36, 48, 62);
+        BackColor = Color.FromArgb(32, 34, 33);
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
         if (Handle == IntPtr.Zero)
         {
@@ -2151,8 +1883,8 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         double? primary = snapshot != null && snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null;
         double? secondary = snapshot != null && snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null;
         _trayTip.ShowTip(
-            QuotaFormatter.Line(snapshot != null ? snapshot.Primary : null, "内置"),
-            QuotaFormatter.Line(snapshot != null ? snapshot.Secondary : null, "其他"),
+            QuotaPresentation.TrayLine(snapshot != null ? snapshot.Primary : null, false),
+            QuotaPresentation.TrayLine(snapshot != null ? snapshot.Secondary : null, true),
             GlassTheme.Emphasis(primary),
             GlassTheme.Emphasis(secondary),
             icon);
@@ -2226,6 +1958,7 @@ internal sealed class QuotaApplicationContext : ApplicationContext
         {
             NativeMethods.SetForegroundWindow(notifyWindow.Handle);
         }
+        ClosePopup();
         _menu.Show(Control.MousePosition);
         if (notifyWindow != null && notifyWindow.Handle != IntPtr.Zero)
         {

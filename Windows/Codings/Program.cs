@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -9,6 +9,9 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
+[assembly: System.Reflection.AssemblyVersion("1.5.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.5.1.0")]
+
 internal static class CursorQuotaPetMain
 {
     private const string MutexName = "Local\\CursorQuotaPet";
@@ -17,6 +20,30 @@ internal static class CursorQuotaPetMain
     [STAThread]
     private static int Main(string[] args)
     {
+        bool preview = Option(args, "--preview-ui=") != null || Has(args, "--render-previews");
+        if (preview && Has(args, "--probe")) return 2;
+        if (Has(args, "--render-previews"))
+        {
+            BindConsole();
+            string output = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "Previews", "1.5.1");
+            RenderPreviews(Path.GetFullPath(output));
+            return 0;
+        }
+        string scenario = Option(args, "--preview-ui=");
+        if (scenario != null)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            string appearance = Option(args, "--appearance=");
+            QuotaColors.PreviewDark = appearance == "dark" ? true : appearance == "light" ? false : (bool?)null;
+            QuotaPopupForm popup = new QuotaPopupForm(delegate { }, delegate { Application.ExitThread(); });
+            QuotaSnapshot sample = PreviewSnapshot(scenario);
+            Screen screen = Screen.PrimaryScreen;
+            popup.ShowSnapshot(sample, PreviewFooter(scenario), new Rectangle(screen.WorkingArea.Right - 100, screen.WorkingArea.Bottom, 24, 24));
+            Application.Run();
+            popup.Dispose();
+            return 0;
+        }
         if (Has(args, "--probe"))
         {
             BindConsole();
@@ -73,9 +100,19 @@ internal static class CursorQuotaPetMain
         if (snapshot == null)
         {
             snapshot = SnapshotCache.Load();
+            if (snapshot != null)
+            {
+                Console.WriteLine(ProbeOk(snapshot).Replace("\"Status\": \"ok\"", "\"Status\": \"snapshot\",\n  \"RefreshError\": \"" + Escape(client.CurrentError) + "\""));
+                return 1;
+            }
         }
         if (snapshot != null)
         {
+            if (snapshot.SourceName == "partial")
+            {
+                Console.WriteLine(ProbeOk(snapshot).Replace("\"Status\": \"ok\"", "\"Status\": \"partial\",\n  \"RefreshError\": \"" + Escape(client.CurrentError) + "\""));
+                return 1;
+            }
             Console.WriteLine(ProbeOk(snapshot));
             return 0;
         }
@@ -94,6 +131,8 @@ internal static class CursorQuotaPetMain
         json.Append("{\n");
         json.Append("  \"IncludedRemain\": ").Append(JsonNumber(snapshot.Primary != null ? snapshot.Primary.Remaining : (double?)null)).Append(",\n");
         json.Append("  \"OtherRemain\": ").Append(JsonNumber(snapshot.Secondary != null ? snapshot.Secondary.Remaining : (double?)null)).Append(",\n");
+        json.Append("  \"ExtraBalanceCents\": ").Append(JsonNumber(snapshot.Secondary != null ? snapshot.Secondary.RemainingAmountCents : (double?)null)).Append(",\n");
+        json.Append("  \"ExtraLimitCents\": ").Append(JsonNumber(snapshot.Secondary != null ? snapshot.Secondary.LimitAmountCents : (double?)null)).Append(",\n");
         json.Append("  \"PlanNote\": ").Append(snapshot.PlanNote == null ? "null" : "\"" + Escape(snapshot.PlanNote) + "\"").Append(",\n");
         json.Append("  \"PlanType\": ").Append(snapshot.PlanType == null ? "null" : "\"" + Escape(snapshot.PlanType) + "\"").Append(",\n");
         json.Append("  \"PrimaryBadge\": \"").Append(Escape(snapshot.Primary != null ? snapshot.Primary.Badge : "内置")).Append("\",\n");
@@ -113,9 +152,9 @@ internal static class CursorQuotaPetMain
             TestAnchor();
             TestDetailLayout();
             TestTrayTipLayout();
-        TestDpiCursorSet();
-        TestAppMark();
-        TestLocator();
+            TestDpiCursorSet();
+            TestAppMark();
+            TestLocator();
             TestHover();
             TestSqlite();
             if (Has(args, "--preview"))
@@ -147,420 +186,26 @@ internal static class CursorQuotaPetMain
 
     private static void TestParser()
     {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["autoPercentUsed"] = 26;
-        planUsage["apiPercentUsed"] = 0;
-        planUsage["limit"] = 2000;
-        planUsage["remaining"] = 1500;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-        dashboard["billingCycleStart"] = "2026-09-01T00:00:00Z";
-        dashboard["billingCycleEnd"] = "2026-10-01T00:00:00Z";
-        Dictionary<string, object> planInfo = new Dictionary<string, object>();
-        Dictionary<string, object> nested = new Dictionary<string, object>();
-        nested["planName"] = "pro";
-        planInfo["planInfo"] = nested;
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, planInfo, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        if (snapshot == null)
-        {
-            throw new Exception("parser returned null");
-        }
-        if (Math.Abs(snapshot.Primary.Remaining.Value - 74) > 0.1)
-        {
-            throw new Exception("allowance remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
-        }
-        if (snapshot.Primary.Badge != "内置")
-        {
-            throw new Exception("allowance badge " + snapshot.Primary.Badge);
-        }
-        if (snapshot.Primary.Detail != null)
-        {
-            throw new Exception("allowance detail " + snapshot.Primary.Detail);
-        }
-        if (Math.Abs(snapshot.Secondary.Remaining.Value - 100) > 0.1)
-        {
-            throw new Exception("other remain");
-        }
-        TestLiveAllowance();
-        TestSmallPoolPercent();
-        TestOtherPercentPoints();
-        TestActualUsageResponse();
-        TestSummaryOnlyUsageResponse();
-        TestUsagePercentWithoutAmountFields();
-        TestAllowanceFallbackWithoutAutoPercent();
-        TestSnapshotCache();
-        TestCurrentPlans();
-        if (QuotaFormatter.PlanTitle(snapshot.PlanType) != "Pro 额度")
-        {
-            throw new Exception("plan title " + QuotaFormatter.PlanTitle(snapshot.PlanType));
-        }
-        if (QuotaFormatter.Percent(10) != "10%")
-        {
-            throw new Exception("percent format");
-        }
+        QuotaDataTests.Run();
+        if (QuotaFormatter.PlanTitle("pro") != "Pro 额度" || QuotaFormatter.PlanTitle("premium") != "Premium 额度")
+            throw new Exception("plan title mapping");
+        if (QuotaFormatter.Percent(0) != "0%" || QuotaFormatter.Percent(null) != "—")
+            throw new Exception("zero and unknown percentage");
+        QuotaWindow weekly = new QuotaWindow();
+        weekly.WindowMinutes = 10080;
+        weekly.Remaining = 0;
+        weekly.Used = 100;
+        if (QuotaPresentation.CardBadge(weekly, false) != "周限额" || QuotaPresentation.Value(weekly, false) != "0%"
+            || QuotaPresentation.Detail(weekly, false) != "已用 100%")
+            throw new Exception("weekly exhausted presentation");
+        QuotaWindow extra = new QuotaWindow();
+        extra.RemainingAmountCents = 21;
+        extra.LimitAmountCents = 500;
+        extra.CurrencyCode = "USD";
+        if (QuotaPresentation.Value(extra, true) != "$0.21 / $5.00" || QuotaPresentation.Detail(extra, true) != "已用 $4.79")
+            throw new Exception("extra cents presentation");
+        if (QuotaPresentation.Value(null, true) != "— / —") throw new Exception("unknown money presentation");
     }
-
-    private static void TestSnapshotCache()
-    {
-        string oldCache = "{\"planType\":\"pro\",\"totalRemain\":0,\"totalUsed\":100,\"primaryBadge\":\"额度\",\"secondaryRemain\":100,\"secondaryUsed\":0}";
-        if (SnapshotCache.Parse(oldCache) != null)
-        {
-            throw new Exception("unversioned old amount cache should be rejected");
-        }
-
-        string versionOneCache = "{\"quotaFormatVersion\":1,\"planType\":\"pro\",\"totalRemain\":0,\"totalUsed\":100,\"primaryBadge\":\"额度\",\"secondaryRemain\":100,\"secondaryUsed\":0}";
-        if (SnapshotCache.Parse(versionOneCache) != null)
-        {
-            throw new Exception("version 1 cache should be rejected");
-        }
-
-        string versionTwoCache = "{\"quotaFormatVersion\":2,\"planType\":\"pro\",\"totalRemain\":95.7867,\"totalUsed\":4.2133,\"primaryBadge\":\"内置\",\"secondaryRemain\":94.7556,\"secondaryUsed\":5.2444,\"secondaryBadge\":\"其他\"}";
-        QuotaSnapshot snapshot = SnapshotCache.Parse(versionTwoCache);
-        if (snapshot == null || snapshot.Primary == null || snapshot.Secondary == null)
-        {
-            throw new Exception("version 2 cache was not parsed");
-        }
-        if (Math.Abs(snapshot.Primary.Remaining.Value - 95.7867) > 0.000001
-            || Math.Abs(snapshot.Secondary.Remaining.Value - 94.7556) > 0.000001)
-        {
-            throw new Exception("version 2 cache quota values were not preserved");
-        }
-        if (snapshot.SourceName != "cache")
-        {
-            throw new Exception("version 2 cache source " + snapshot.SourceName);
-        }
-
-        if (SnapshotCache.Parse("{malformed json") != null)
-        {
-            throw new Exception("malformed cache json should be rejected");
-        }
-    }
-
-    private static void TestCurrentPlans()
-    {
-        ExpectPlan("free", "Free 额度", "有限");
-        ExpectPlan("plus", "Plus 额度", "基础 · 每周");
-        ExpectPlan("premium", "Premium 额度", "4× Plus · 每周");
-        ExpectPlan("super", "Super 额度", "15× Plus · 每周");
-        ExpectPlan("ultra", "Ultra 额度", "50× Plus · 每周");
-        ExpectPlan("pro", "Pro 额度", "月度双池");
-        ExpectPlan("pro_plus", "Pro+ 额度", "月度双池");
-        ExpectPlan("teams_premium", "Teams Premium 额度", "5× Standard · 每月");
-        ExpectPlan("enterprise", "Enterprise 额度", "共享池");
-        ExpectPlan("team", "Teams 额度", "按席位 · 每周");
-        if (PlanCatalog.Note("ultra", PlanCatalog.Model("ultra", true)) != "月度双池")
-        {
-            throw new Exception("legacy ultra note");
-        }
-
-        QuotaSnapshot premium = PlanSnapshot("premium", 26, 40, false, null);
-        AssertPrimaryQuota(premium, 26, 74, "本周", "4× Plus", "本周 74%", "premium weekly pool");
-        ExpectText(premium.PlanNote, "4× Plus · 每周", "premium note");
-        ExpectText(premium.Primary.Schedule, "每周重置", "premium schedule");
-        if (premium.Primary.ResetAt.HasValue)
-        {
-            throw new Exception("premium must not use the monthly billing cycle as the usage reset");
-        }
-        ExpectText(premium.Secondary.Badge, "预付", "premium secondary");
-        ExpectText(premium.Secondary.Detail, "按量", "premium prepaid");
-        if (premium.Secondary.Remaining.HasValue)
-        {
-            throw new Exception("premium api percent was treated as an included other pool");
-        }
-        ExpectText(QuotaFormatter.Line(premium.Secondary, "其他"), "预付 按量", "premium line");
-
-        QuotaSnapshot plus = PlanSnapshot("plus", 10, 80, false, null);
-        AssertPrimaryQuota(plus, 10, 90, "本周", "基础", "本周 90%", "plus weekly pool");
-        ExpectText(plus.Secondary.Detail, "不含", "plus third party");
-        ExpectText(QuotaFormatter.Line(plus.Secondary, "其他"), "第三方 不含", "plus line");
-
-        QuotaSnapshot super = PlanSnapshot("super", 15, 1, false, null);
-        AssertPrimaryQuota(super, 15, 85, "本周", "15× Plus", "本周 85%", "super weekly pool");
-        QuotaSnapshot ultra = PlanSnapshot("ultra", 20, 10, false, null);
-        AssertPrimaryQuota(ultra, 20, 80, "本周", "50× Plus", "本周 80%", "ultra weekly pool");
-        ExpectText(ultra.Secondary.Badge, "预付", "ultra secondary");
-
-        QuotaSnapshot legacyUltra = PlanSnapshot("ultra", 20, 10, true, null);
-        AssertPrimaryQuota(legacyUltra, 20, 80, "内置", null, "内置 80%", "legacy ultra");
-        AssertOtherQuota(legacyUltra, 10, 90, "其他 90%", "legacy ultra other");
-        ExpectText(legacyUltra.PlanNote, "月度双池", "legacy ultra note");
-
-        QuotaSnapshot pro = PlanSnapshot("pro", 26, 40, false, null);
-        AssertPrimaryQuota(pro, 26, 74, "内置", null, "内置 74%", "legacy pro");
-        AssertOtherQuota(pro, 40, 60, "其他 60%", "legacy pro other");
-        ExpectText(pro.PlanNote, "月度双池", "legacy pro note");
-        if (!pro.Primary.ResetAt.HasValue)
-        {
-            throw new Exception("legacy pro lost its billing reset");
-        }
-
-        QuotaSnapshot teamsPremium = PlanSnapshot("teams_premium", 5, 6, false, null);
-        AssertPrimaryQuota(teamsPremium, 5, 95, "内置", null, "内置 95%", "legacy teams premium");
-        AssertOtherQuota(teamsPremium, 6, 94, "其他 94%", "legacy teams premium other");
-        ExpectText(teamsPremium.PlanNote, "5× Standard · 每月", "legacy teams premium note");
-
-        QuotaSnapshot free = PlanSnapshot("free", 50, null, false, null);
-        AssertPrimaryQuota(free, 50, 50, "有限", "有限", "有限 50%", "free");
-        ExpectText(free.Secondary.Detail, "不含", "free third party");
-
-        QuotaSnapshot start = PlanSnapshot("start", 12, 9, false, null);
-        AssertPrimaryQuota(start, 12, 88, "内置", null, "内置 88%", "start");
-        ExpectText(start.Secondary.Detail, "不含", "start other pool");
-        ExpectText(start.PlanNote, "仅内置 · 每月", "start note");
-
-        QuotaSnapshot enterprise = PlanSnapshot("enterprise", 30, 4, false, null);
-        AssertPrimaryQuota(enterprise, 30, 70, "共享", null, "共享 70%", "enterprise");
-        ExpectText(enterprise.PlanNote, "共享池", "enterprise note");
-        ExpectText(enterprise.Secondary.Badge, "预付", "enterprise prepaid");
-        if (!enterprise.Primary.ResetAt.HasValue)
-        {
-            throw new Exception("enterprise lost its billing reset");
-        }
-
-        QuotaSnapshot credited = PlanSnapshot("premium", 26, null, false, 1250);
-        ExpectText(credited.Secondary.Detail, "余额 $12.50", "prepaid balance");
-        ExpectText(QuotaFormatter.Line(credited.Secondary, "其他"), "预付 余额 $12.50", "prepaid line");
-    }
-
-    private static void ExpectPlan(string plan, string title, string note)
-    {
-        string actualTitle = QuotaFormatter.PlanTitle(plan);
-        if (actualTitle != title)
-        {
-            throw new Exception("title " + plan + " " + actualTitle);
-        }
-        string actualNote = PlanCatalog.Note(plan, PlanCatalog.Model(plan, false));
-        if (actualNote != note)
-        {
-            throw new Exception("note " + plan + " " + actualNote);
-        }
-    }
-
-    private static void ExpectText(string actual, string expected, string name)
-    {
-        if (actual != expected)
-        {
-            throw new Exception(name + " expected " + expected + " actual " + (actual ?? "null"));
-        }
-    }
-
-    private static QuotaSnapshot PlanSnapshot(string membership, double autoUsed, double? apiUsed, bool legacy, double? creditCents)
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["autoPercentUsed"] = autoUsed;
-        if (apiUsed.HasValue)
-        {
-            planUsage["apiPercentUsed"] = apiUsed.Value;
-        }
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-        dashboard["billingCycleStart"] = "2026-09-01T00:00:00Z";
-        dashboard["billingCycleEnd"] = "2026-10-01T00:00:00Z";
-        Dictionary<string, object> summary = new Dictionary<string, object>();
-        summary["membershipType"] = membership;
-        if (legacy)
-        {
-            summary["isLegacyPlan"] = true;
-        }
-        if (creditCents.HasValue)
-        {
-            summary["creditBalanceCents"] = creditCents.Value;
-        }
-        return QuotaParser.Snapshot(dashboard, null, summary, null, null, null, DateTime.UtcNow, "cursor-api");
-    }
-
-    private static void TestLiveAllowance()
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["includedSpend"] = 508;
-        planUsage["remaining"] = 1492;
-        planUsage["limit"] = 2000;
-        planUsage["autoPercentUsed"] = 1.1289;
-        planUsage["apiPercentUsed"] = 0;
-        planUsage["totalPercentUsed"] = 1.0751;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-        dashboard["displayMessage"] = "You've used 25% of your included usage";
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        if (snapshot == null)
-        {
-            throw new Exception("live allowance parser returned null");
-        }
-        AssertPrimaryQuota(snapshot, 1.1289, 98.8711, "内置", null, "内置 99%", "auto pool must take priority over live amount fields");
-        if (Math.Abs(snapshot.Secondary.Remaining.Value - 100) > 0.1)
-        {
-            throw new Exception("live other remain");
-        }
-    }
-
-    private static void TestSmallPoolPercent()
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["autoPercentUsed"] = 0.7;
-        planUsage["apiPercentUsed"] = 0;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        if (snapshot == null)
-        {
-            throw new Exception("small pool parser returned null");
-        }
-        if (snapshot.Primary.Badge != "内置")
-        {
-            throw new Exception("small pool badge " + snapshot.Primary.Badge);
-        }
-        if (Math.Abs(snapshot.Primary.Remaining.Value - 99.3) > 0.05)
-        {
-            throw new Exception("small pool remain " + snapshot.Primary.Remaining.Value.ToString(CultureInfo.InvariantCulture));
-        }
-        if (Math.Abs(snapshot.Primary.Used.Value - 0.7) > 0.000001 || QuotaFormatter.Line(snapshot.Primary, "内置") != "内置 99%")
-        {
-            throw new Exception("small pool percentage-point display");
-        }
-    }
-
-    private static void TestOtherPercentPoints()
-    {
-        double[] usedValues = new double[] { 0.6222222222222222, 0.7, 1, 0 };
-        double[] remainingValues = new double[] { 99.37777777777778, 99.3, 99, 100 };
-        string[] lines = new string[] { "其他 99%", "其他 99%", "其他 99%", "其他 100%" };
-        for (int i = 0; i < usedValues.Length; i++)
-        {
-            Dictionary<string, object> planUsage = new Dictionary<string, object>();
-            planUsage["apiPercentUsed"] = usedValues[i];
-            Dictionary<string, object> dashboard = new Dictionary<string, object>();
-            dashboard["planUsage"] = planUsage;
-            QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-            AssertOtherQuota(snapshot, usedValues[i], remainingValues[i], lines[i], "dashboard apiPercentUsed " + usedValues[i].ToString(CultureInfo.InvariantCulture));
-        }
-
-        Dictionary<string, object> summaryPlan = new Dictionary<string, object>();
-        summaryPlan["apiPercentUsed"] = 0.6222222222222222;
-        Dictionary<string, object> individualUsage = new Dictionary<string, object>();
-        individualUsage["plan"] = summaryPlan;
-        Dictionary<string, object> summary = new Dictionary<string, object>();
-        summary["individualUsage"] = individualUsage;
-        QuotaSnapshot summarySnapshot = QuotaParser.Snapshot(null, null, summary, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertOtherQuota(summarySnapshot, 0.6222222222222222, 99.37777777777778, "其他 99%", "summary individualUsage.plan apiPercentUsed");
-
-        Dictionary<string, object> messageDashboard = new Dictionary<string, object>();
-        messageDashboard["namedModelSelectedDisplayMessage"] = "You've used 0.6% of named model usage";
-        QuotaSnapshot messageSnapshot = QuotaParser.Snapshot(messageDashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertOtherQuota(messageSnapshot, 0.6, 99.4, "其他 99%", "namedModelSelectedDisplayMessage");
-    }
-
-    private static void AssertOtherQuota(QuotaSnapshot snapshot, double expectedUsed, double expectedRemaining, string expectedLine, string context)
-    {
-        if (snapshot == null || snapshot.Secondary == null || !snapshot.Secondary.Used.HasValue || !snapshot.Secondary.Remaining.HasValue)
-        {
-            throw new Exception(context + " did not produce other quota percentages");
-        }
-        if (Math.Abs(snapshot.Secondary.Used.Value - expectedUsed) > 0.000001)
-        {
-            throw new Exception(context + " used " + snapshot.Secondary.Used.Value.ToString("R", CultureInfo.InvariantCulture));
-        }
-        if (Math.Abs(snapshot.Secondary.Remaining.Value - expectedRemaining) > 0.000001)
-        {
-            throw new Exception(context + " remain " + snapshot.Secondary.Remaining.Value.ToString("R", CultureInfo.InvariantCulture));
-        }
-        string actualLine = QuotaFormatter.Line(snapshot.Secondary, "其他");
-        if (actualLine != expectedLine)
-        {
-            throw new Exception(context + " display " + actualLine);
-        }
-    }
-
-    private static void TestActualUsageResponse()
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["totalSpend"] = 2014;
-        planUsage["includedSpend"] = 2000;
-        planUsage["bonusSpend"] = 14;
-        planUsage["limit"] = 2000;
-        planUsage["autoPercentUsed"] = 4.213333333333334;
-        planUsage["apiPercentUsed"] = 5.2444444444444445;
-        planUsage["totalPercentUsed"] = 4.262433862433863;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertPrimaryQuota(snapshot, 4.213333333333334, 95.78666666666666, "内置", null, "内置 96%", "current dashboard response primary");
-        AssertOtherQuota(snapshot, 5.2444444444444445, 94.75555555555555, "其他 95%", "current dashboard response secondary");
-    }
-
-    private static void TestSummaryOnlyUsageResponse()
-    {
-        Dictionary<string, object> summaryPlan = new Dictionary<string, object>();
-        summaryPlan["used"] = 2000;
-        summaryPlan["limit"] = 2000;
-        summaryPlan["remaining"] = 0;
-        summaryPlan["autoPercentUsed"] = 4.213333333333334;
-        summaryPlan["apiPercentUsed"] = 5.2444444444444445;
-        summaryPlan["totalPercentUsed"] = 4.262433862433863;
-        Dictionary<string, object> individualUsage = new Dictionary<string, object>();
-        individualUsage["plan"] = summaryPlan;
-        Dictionary<string, object> summary = new Dictionary<string, object>();
-        summary["individualUsage"] = individualUsage;
-
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(null, null, summary, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertPrimaryQuota(snapshot, 4.213333333333334, 95.78666666666666, "内置", null, "内置 96%", "summary-only primary");
-        AssertOtherQuota(snapshot, 5.2444444444444445, 94.75555555555555, "其他 95%", "summary-only secondary");
-    }
-
-    private static void TestUsagePercentWithoutAmountFields()
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["autoPercentUsed"] = 4.213333333333334;
-        planUsage["apiPercentUsed"] = 5.2444444444444445;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertPrimaryQuota(snapshot, 4.213333333333334, 95.78666666666666, "内置", null, "内置 96%", "percent-only dashboard response");
-        AssertOtherQuota(snapshot, 5.2444444444444445, 94.75555555555555, "其他 95%", "percent-only dashboard response secondary");
-    }
-
-    private static void TestAllowanceFallbackWithoutAutoPercent()
-    {
-        Dictionary<string, object> planUsage = new Dictionary<string, object>();
-        planUsage["includedSpend"] = 508;
-        planUsage["remaining"] = 1492;
-        planUsage["limit"] = 2000;
-        planUsage["apiPercentUsed"] = 5.2444444444444445;
-        planUsage["totalPercentUsed"] = 4.262433862433863;
-        Dictionary<string, object> dashboard = new Dictionary<string, object>();
-        dashboard["planUsage"] = planUsage;
-
-        QuotaSnapshot snapshot = QuotaParser.Snapshot(dashboard, null, null, null, null, null, DateTime.UtcNow, "cursor-api");
-        AssertPrimaryQuota(snapshot, 25.4, 74.6, "额度", "$5.08 / $20", "额度 75%", "amount fallback without autoPercentUsed");
-        AssertOtherQuota(snapshot, 5.2444444444444445, 94.75555555555555, "其他 95%", "amount fallback secondary");
-    }
-
-    private static void AssertPrimaryQuota(QuotaSnapshot snapshot, double expectedUsed, double expectedRemaining, string expectedBadge, string expectedDetail, string expectedLine, string context)
-    {
-        if (snapshot == null || snapshot.Primary == null || !snapshot.Primary.Used.HasValue || !snapshot.Primary.Remaining.HasValue)
-        {
-            throw new Exception(context + " did not produce primary quota percentages");
-        }
-        if (Math.Abs(snapshot.Primary.Used.Value - expectedUsed) > 0.000001)
-        {
-            throw new Exception(context + " used " + snapshot.Primary.Used.Value.ToString("R", CultureInfo.InvariantCulture));
-        }
-        if (Math.Abs(snapshot.Primary.Remaining.Value - expectedRemaining) > 0.000001)
-        {
-            throw new Exception(context + " remain " + snapshot.Primary.Remaining.Value.ToString("R", CultureInfo.InvariantCulture));
-        }
-        if (snapshot.Primary.Badge != expectedBadge || snapshot.Primary.Detail != expectedDetail)
-        {
-            throw new Exception(context + " badge/detail " + snapshot.Primary.Badge + "/" + (snapshot.Primary.Detail ?? "null"));
-        }
-        string actualLine = QuotaFormatter.Line(snapshot.Primary, expectedBadge);
-        if (actualLine != expectedLine)
-        {
-            throw new Exception(context + " display " + actualLine);
-        }
-    }
-
     private static void TestAnchor()
     {
         Rectangle screen = new Rectangle(0, 0, 1920, 1080);
@@ -1037,17 +682,21 @@ internal static class CursorQuotaPetMain
     private static QuotaSnapshot CreatePreviewSnapshot()
     {
         QuotaWindow primary = new QuotaWindow();
-        primary.Badge = "本周";
-        primary.Title = "Cursor 模型剩余";
+        primary.Badge = "内置";
+        primary.Title = "周限额";
         primary.Remaining = 74;
         primary.Used = 26;
-        primary.Detail = "4× Plus";
+        primary.WindowMinutes = 10080;
+        primary.ResetAt = (DateTime.UtcNow.AddDays(3).AddHours(2) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
         primary.Schedule = "每周重置";
         QuotaWindow secondary = new QuotaWindow();
-        secondary.Badge = "预付";
-        secondary.Title = "第三方预付";
-        secondary.Detail = "按量";
-        secondary.Schedule = "用完为止";
+        secondary.Badge = "额外";
+        secondary.Title = "额外额度池";
+        secondary.Remaining = 45;
+        secondary.Used = 55;
+        secondary.RemainingAmountCents = 900;
+        secondary.LimitAmountCents = 2000;
+        secondary.CurrencyCode = "USD";
         QuotaSnapshot snapshot = new QuotaSnapshot();
         snapshot.PlanType = "premium";
         snapshot.PlanNote = "4× Plus · 每周";
@@ -1075,6 +724,66 @@ internal static class CursorQuotaPetMain
         {
             tray.Save(Path.Combine(folder, "cursor-quota-tray-icon.png"), ImageFormat.Png);
         }
+    }
+
+    private static QuotaSnapshot PreviewSnapshot(string scenario)
+    {
+        if (scenario == "empty") return null;
+        QuotaSnapshot snapshot = CreatePreviewSnapshot();
+        if (scenario == "warning") { snapshot.Primary.Remaining = 24; snapshot.Primary.Used = 76; }
+        if (scenario == "critical")
+        {
+            snapshot.Primary.Remaining = 0;
+            snapshot.Primary.Used = 100;
+            snapshot.Secondary.Remaining = 4.2;
+            snapshot.Secondary.Used = 95.8;
+            snapshot.Secondary.RemainingAmountCents = 21;
+            snapshot.Secondary.LimitAmountCents = 500;
+        }
+        if (scenario == "snapshot" || scenario == "error") snapshot.SourceName = "cache";
+        if (scenario == "partial")
+        {
+            snapshot.Primary.Remaining = null;
+            snapshot.Primary.Used = null;
+            snapshot.SourceName = "partial";
+        }
+        return snapshot;
+    }
+
+    private static string PreviewFooter(string scenario)
+    {
+        if (scenario == "empty") return "未找到 Cursor 登录态，请先在 Cursor 中登录";
+        if (scenario == "error") return "更新于 14:15 · 网络连接失败，正在显示上次快照";
+        if (scenario == "partial") return "部分数据 14:15 · 主额度暂不可用，请刷新或检查 Cursor 登录状态";
+        return "更新于 14:15";
+    }
+
+    private static void RenderPreviews(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        string[] scenarios = new string[] { "normal", "warning", "critical", "empty", "snapshot", "error", "partial" };
+        DetailLayout layout = DetailLayout.Create(new Rectangle(0, 0, 1920, 1080), 192);
+        for (int i = 0; i < scenarios.Length; i++)
+        {
+            for (int dark = 0; dark < 2; dark++)
+            {
+                Rectangle refresh, close;
+                using (Bitmap bitmap = DetailPainter.Render(PreviewSnapshot(scenarios[i]), PreviewFooter(scenarios[i]), layout, false, false, dark == 1, out refresh, out close))
+                    bitmap.Save(Path.Combine(directory, scenarios[i] + (dark == 1 ? "-dark.png" : "-light.png")), ImageFormat.Png);
+            }
+        }
+        using (Bitmap app = AppMarkPainter.Render(256, false, null, null))
+            app.Save(Path.Combine(directory, "app-icon.png"), ImageFormat.Png);
+        using (Bitmap tray = AppMarkPainter.Render(32, true, 74, 45))
+            tray.Save(Path.Combine(directory, "tray-icon.png"), ImageFormat.Png);
+        Console.WriteLine("previews=" + directory);
+    }
+
+    private static string Option(string[] args, string prefix)
+    {
+        for (int i = 0; args != null && i < args.Length; i++)
+            if (args[i].StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return args[i].Substring(prefix.Length).ToLowerInvariant();
+        return null;
     }
 
     private static string FormatRectangle(Rectangle rect)
@@ -1141,7 +850,7 @@ internal static class CursorQuotaPetMain
             }
             stdout = NativeMethods.GetStdHandle(-11);
         }
-        StreamWriter writer = new StreamWriter(new FileStream(stdout, FileAccess.Write), new UTF8Encoding(false));
+        StreamWriter writer = new StreamWriter(new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(stdout, false), FileAccess.Write), new UTF8Encoding(false));
         writer.AutoFlush = true;
         Console.SetOut(writer);
         Console.SetError(writer);

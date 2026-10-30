@@ -1,11 +1,15 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Windows.Forms;
+
+[assembly: AssemblyVersion("1.5.1.0")]
+[assembly: AssemblyFileVersion("1.5.1.0")]
 
 internal static class SetupProgram
 {
@@ -81,6 +85,7 @@ internal sealed class SetupOptions
 internal static class SetupInstaller
 {
     public const string AppTitle = "Cursor仪表盘";
+    private static string UninstallKeyPath { get { return InstallIdentity.UninstallKeyPath; } }
 
     public static string Install(SetupOptions options)
     {
@@ -106,15 +111,45 @@ internal static class SetupInstaller
 
         Extract("CursorQuotaPet.exe", targetExe);
         Extract("CursorQuotaPet.ico", targetIcon);
+        Extract("Uninstall.exe", Path.Combine(root, "Uninstall.exe"));
+        File.WriteAllText(Path.Combine(root, InstallIdentity.MarkerName), InstallIdentity.Marker);
+        string registeredIcon = CreateVersionedIcon(root, targetIcon);
         DeleteIfExists(Path.Combine(root, "CursorQuotaPet.core.exe"));
         DeleteIfExists(Path.Combine(root, "CursorQuotaPet.original.exe"));
         if (!options.NoShortcuts)
         {
-            CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppTitle + ".lnk"), targetExe, root);
-            CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppTitle + ".lnk"), targetExe, root);
+            CreateShortcut(Path.Combine(InstallIdentity.ShortcutDirectory(false), AppTitle + ".lnk"), targetExe, root, registeredIcon);
+            CreateShortcut(Path.Combine(InstallIdentity.ShortcutDirectory(true), AppTitle + ".lnk"), targetExe, root, registeredIcon);
         }
-        RememberInstall(root, targetExe);
+        RememberInstall(root, registeredIcon);
+        NotifyIconChanged(targetIcon);
+        NotifyIconChanged(registeredIcon);
+        NotifyIconChanged(targetExe);
+        // Refresh shell consumers of DisplayIcon without deleting their caches.
+        SHChangeNotify(0x08000000, 0x2000, null, null); // SHCNE_ASSOCCHANGED, SHCNF_FLUSHNOWAIT
         return root;
+    }
+
+    private static string CreateVersionedIcon(string root, string sourceIcon)
+    {
+        string hash;
+        using (SHA256 algorithm = SHA256.Create())
+        using (FileStream input = File.OpenRead(sourceIcon))
+        {
+            hash = BitConverter.ToString(algorithm.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
+        }
+        // A new icon gets a new shell cache key even when the EXE path stays fixed.
+        string destination = Path.Combine(root, "CursorQuotaPet-" + hash.Substring(0, 16) + ".ico");
+        File.Copy(sourceIcon, destination, true);
+        return destination;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern void SHChangeNotify(uint eventId, uint flags, string item1, string item2);
+
+    private static void NotifyIconChanged(string path)
+    {
+        SHChangeNotify(0x00002000, 0x2005, path, null); // SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT
     }
 
     private static void Extract(string resourceName, string destination)
@@ -168,6 +203,24 @@ internal static class SetupInstaller
 
     private static string FindExistingRoot()
     {
+        try
+        {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(UninstallKeyPath + @"\CursorQuotaPet"))
+            {
+                object location = key == null ? null : key.GetValue("InstallLocation");
+                if (location != null)
+                {
+                    string candidate = Environment.ExpandEnvironmentVariables(location.ToString().Trim());
+                    if (File.Exists(Path.Combine(candidate, "CursorQuotaPet.exe")))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
         string fromRegistry = FindInUninstall(@"Software\Microsoft\Windows\CurrentVersion\Uninstall", false);
         if (fromRegistry != null)
         {
@@ -246,38 +299,89 @@ internal static class SetupInstaller
         return null;
     }
 
-    private static void CreateShortcut(string shortcutPath, string targetExe, string workingDirectory)
+    private static void CreateShortcut(string shortcutPath, string targetExe, string workingDirectory, string iconPath)
     {
-        Type shellType = Type.GetTypeFromProgID("WScript.Shell");
-        object shell = Activator.CreateInstance(shellType);
-        object shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
-        Type shortcutType = shortcut.GetType();
-        shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { targetExe });
-        shortcutType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { "--show" });
-        shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { workingDirectory });
-        shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { targetExe + ",0" });
-        shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
-    }
-
-    private static void RememberInstall(string root, string targetExe)
-    {
+        string directory = Path.GetDirectoryName(shortcutPath);
+        Directory.CreateDirectory(directory);
+        string temporary = Path.Combine(directory, ".CursorQuotaPet-" + Guid.NewGuid().ToString("N") + ".lnk");
         try
         {
-            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\CursorQuotaPet"))
+            object shell = null;
+            object shortcut = null;
+            try
             {
-                key.SetValue("DisplayName", AppTitle);
-                key.SetValue("InstallLocation", root);
-                key.SetValue("DisplayIcon", targetExe);
-                key.SetValue("Publisher", "CursorQuotaPet");
-                key.SetValue("NoModify", 1, Microsoft.Win32.RegistryValueKind.DWord);
-                key.SetValue("NoRepair", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                shell = Activator.CreateInstance(shellType);
+                // A fresh file avoids carrying old Shell Link metadata forward.
+                shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { temporary });
+                Type shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { targetExe });
+                shortcutType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { "--show" });
+                shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { workingDirectory });
+                shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { iconPath + ",0" });
+                shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { AppTitle + " - 查看 Cursor 额度与余额" });
+                shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
             }
+            finally
+            {
+                if (shortcut != null) Marshal.FinalReleaseComObject(shortcut);
+                if (shell != null) Marshal.FinalReleaseComObject(shell);
+            }
+            bool replacing = File.Exists(shortcutPath);
+            if (replacing) File.Replace(temporary, shortcutPath, null);
+            else File.Move(temporary, shortcutPath);
+            // Refresh this link's cached identity and image before returning.
+            if (replacing) SHChangeNotify(0x00000004, 0x1005, shortcutPath, null); // SHCNE_DELETE, SHCNF_PATHW | SHCNF_FLUSH
+            SHChangeNotify(0x00000002, 0x1005, shortcutPath, null); // SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSH
         }
-        catch
+        finally
         {
+            DeleteIfExists(temporary);
         }
     }
 
+    private static void RememberInstall(string root, string iconPath)
+    {
+        // The new installation owns one standard current-user record.
+        using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(UninstallKeyPath + @"\CursorQuotaPet"))
+        {
+            string uninstaller = Path.Combine(root, "Uninstall.exe");
+            if (!File.Exists(uninstaller)) throw new IOException("找不到卸载程序。");
+            key.SetValue("DisplayName", AppTitle);
+            key.SetValue("DisplayVersion", "1.5.1");
+            key.SetValue("InstallLocation", root);
+            key.SetValue("DisplayIcon", iconPath + ",0");
+            key.SetValue("UninstallString", "\"" + uninstaller + "\"");
+            key.SetValue("QuietUninstallString", "\"" + uninstaller + "\" --quiet");
+            key.SetValue("Publisher", "CursorQuotaPet");
+            key.SetValue("NoRemove", 0, Microsoft.Win32.RegistryValueKind.DWord);
+            key.SetValue("SystemComponent", 0, Microsoft.Win32.RegistryValueKind.DWord);
+            key.SetValue("NoModify", 1, Microsoft.Win32.RegistryValueKind.DWord);
+            key.SetValue("NoRepair", 1, Microsoft.Win32.RegistryValueKind.DWord);
+        }
+        // Only same-title registrations for this exact root have been superseded.
+        // Other installations retain their original registration and uninstaller.
+        using (Microsoft.Win32.RegistryKey uninstall = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(UninstallKeyPath, true))
+        {
+            foreach (string name in uninstall.GetSubKeyNames())
+            {
+                if (string.Equals(name, "CursorQuotaPet", StringComparison.OrdinalIgnoreCase)) continue;
+                bool superseded = false;
+                using (Microsoft.Win32.RegistryKey legacy = uninstall.OpenSubKey(name))
+                {
+                    object title = legacy == null ? null : legacy.GetValue("DisplayName");
+                    string location = legacy == null ? null : legacy.GetValue("InstallLocation") as string;
+                    if (title != null && title.ToString() == AppTitle && !string.IsNullOrEmpty(location))
+                    {
+                        try { superseded = InstallIdentity.SamePath(Environment.ExpandEnvironmentVariables(location.Trim()), root); }
+                        catch (ArgumentException) { }
+                        catch (NotSupportedException) { }
+                    }
+                }
+                if (superseded) uninstall.DeleteSubKeyTree(name, false);
+            }
+        }
+    }
     private static void DeleteIfExists(string path)
     {
         try

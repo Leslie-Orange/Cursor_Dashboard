@@ -2,9 +2,9 @@
 
 macOS 菜单栏与 Windows 托盘小工具，显示当前 Cursor 账号的剩余额度。
 
-Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`，第二行显示 `预付 按量` 或 `第三方 不含`；旧档显示 `内置 76%` 和 `其他 45%`。macOS 1.5.1 的菜单栏显示主限额和额外额度池的剩余比例，详情卡片显示周限额和额外池的美元余额 / 总额，同时兼容旧月套餐。Windows 托盘图标显示两行数字；鼠标悬停时，余额显示在图标正上方，图标在任务栏或隐藏图标面板里都一样。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
+Windows 和 macOS 1.5.1 的详情显示主限额与额外额度池，支持周限额及旧月套餐。Windows 托盘图标以两条动态进度条显示剩余比例，鼠标悬停显示两行数值。点击状态栏 / 托盘图标后展开详情；点击外部或按 Esc 关闭弹窗。右键可立即刷新、打开官方用量页或退出。
 
-本工具读取的是 **Cursor 套餐用量**，不是 ChatGPT 或 Codex 的限额窗口。现行 X Subscription 使用每周刷新的 Cursor 模型池；旧档 Pro / Pro+ 等仍使用两个按月刷新的池。
+本工具读取的是 **Cursor 套餐用量**，不是 ChatGPT 或 Codex 的限额窗口。额度和账单最终以 Cursor 官方页面为准。
 
 ## 仓库结构
 
@@ -20,19 +20,12 @@ Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`�
 
 - 菜单栏 / 托盘常驻，无需打开主窗口
 - macOS 1.5.1 详情采用系统原生玻璃材质，旧版 macOS 使用匹配的半透明效果
-- macOS 菜单栏将第二行统一标为「额外」；应用图标与菜单栏标记使用同一套扁平矢量图形
-- macOS 1.5.1 按套餐周期显示周限额或旧月限额；额外额度池优先显示信用额度余额 / 总额
-- Windows 显示套餐 / 计划名称和官方包含额度副标题（例如 Premium 为 `4× Plus · 每周`）
-- Windows 和 macOS 识别相同的现行与旧版套餐档位
-- Windows 现行档位显示本周 Cursor 模型池剩余；Premium 及以上的第二行是第三方预付，Plus 和 Free 标明第三方不含
-- 旧档仍显示内置模型池和其他模型池的剩余百分比
-- Windows 未返回主模型池比例时按接口金额额度回退；macOS 旧月套餐沿用 PR 的金额口径，详见下方专项说明
-- Windows 旧档和企业共享池显示账单周期倒计时；Windows 现行个人档位显示每周重置
-- 显示计费周期重置倒计时
+- Windows 1.5.1 跟随系统浅色或深色应用模式，并支持高对比度回退；应用及托盘图标使用立方体标记
+- 按接口的套餐周期显示周限额或月限额，额外额度池显示可用的余额 / 总额
 - 约 30 秒自动刷新；弹窗内或右键可立即刷新
-- 剩余不足时圆环和百分比变黄（≤30%）或变红（≤10%）
-- 接口暂时失败时，回退到本机上次成功快照，并标记为「快照」
-- `--probe` 自检只输出剩余比例、套餐和采样时间，不输出会话令牌
+- 剩余不足时进度条和数值变黄（≤30%）或变红（≤10%）
+- 接口暂时失败时可回退本机上次成功快照，并标记为「快照」及显示错误
+- `--probe` 输出额度、套餐和采样时间，不输出会话令牌
 
 ## 额度数据来源
 
@@ -51,7 +44,7 @@ Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`�
 4. 本机 Cursor 已登录会话（默认、推荐）  
    macOS：`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`  
    Windows：`%APPDATA%\Cursor\User\globalStorage\state.vscdb`  
-   读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。
+   读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。Windows 支持 Cursor 3.27 的 `cursor-safe-storage:v1:` 加密凭据，使用当前 Windows 用户及 Cursor 本地密钥在内存中解码；还会尝试 `cachedAccessToken`、`webAccessToken` 和本地 `auth.json` 中的登录态。遇到未认证时可尝试其他候选凭证。
 
 只要 Cursor 应用已登录，一般无需再配置。会话过期时，重新在 Cursor 里登录即可。
 
@@ -70,35 +63,25 @@ Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`�
 - `GET https://api2.cursor.sh/auth/full_stripe_profile`  
   回退：订阅类型（Free / Plus / Premium / Pro / Ultra / Team 等）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance`
-  macOS 1.5.1 只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
+  只读信用额度池余额、总额与已用金额（`creditBalanceCents`、`totalCents`、`usedCents`）。
 - `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUserPrepaidBilling`
   没有活动信用额度池时，只读预付额度余额、充值总额与已用金额（`availableCents`、`fundedCents`、`spentCents`）。
 
-以上额度接口只读，不会创建或修改额度。金额字段以美分为单位，macOS 详情按美元格式显示，例如 `25` 表示 `$0.25`。这些是 Cursor 仪表盘使用的内部接口，不是公开稳定 API，字段可能变化。金额与百分比仍以官方页面为准：
+以上额度接口只读，不会创建或修改额度。金额字段以美分为单位，详情按美元格式显示，例如 `25` 表示 `$0.25`。这些是 Cursor 仪表盘使用的内部接口，不是公开稳定 API，字段可能变化。金额与百分比仍以官方页面为准：
 
 <https://cursor.com/dashboard/usage>
 
-### Windows 展示字段
+### Windows 1.5.1 展示字段
 
-| 位置 | 现行档位（Free / Plus / Premium / Super / Ultra / Teams） | 旧档（Pro / Pro+ / Teams Standard 等） |
-| --- | --- | --- |
-| 状态栏第一行 | **本周** Cursor 模型池剩余；Free 为 **有限** | **内置**模型池剩余；缺少比例时回退为 **额度** |
-| 状态栏第二行 | Premium 及以上为 **预付**；Plus / Free 为 **第三方 不含** | **其他**模型池剩余 |
-| 弹窗标题 | 套餐名称和官方包含额度，如 `Premium 额度`、`4× Plus · 每周` | 套餐名称，如 `Pro 额度`、`月度双池` |
-| 第一张卡片 | 本周剩余和 `每周重置`；卡片右侧是该档倍数，如 `4× Plus` | 内置模型池剩余、重置倒计时、消耗速度 |
-| 第二张卡片 | 第三方预付。接口若返回余额则显示金额，否则显示 `按量` | 其他模型剩余、同一周期的重置倒计时 |
-| 底部状态 | `实时` 或 `快照`、最近采样时间；过期或出错时附加说明 | 同左 |
-| 颜色 | 剩余 ≤30% 黄色，≤10% 红色 | 同左 |
+| 位置 | 内容 |
+| --- | --- |
+| 托盘图标及悬浮提示 | 两条进度条对应主限额和额外额度池；悬浮提示显示两行剩余比例 |
+| 弹窗标题 | 套餐名称和可用的重置时刻 |
+| 主卡片 | 周限额或月限额的剩余比例和可用的重置时间 |
+| 额外卡片 | 剩余比例及余额 / 总额；金额未知时显示 `— / —` |
+| 底部状态 | 刷新中、最近采样时间或快照状态；刷新失败时显示原因 |
 
-Windows 消耗速度只在能确定用量窗口时计算，按「本窗口已用百分比 ÷ 已经过天数」。周期刚开始不足 1 小时时，按 1 小时折算，避免数字被放大。Windows 现行档位的用量按周重置；官方页面没有给出具体的下周重置时刻，因此不把月度账单日当成 Windows 用量重置日。
-
-## 套餐档位与包含额度
-
-档位和包含额度以 2026-10-20 打开的官方页面为准：[定价](https://cursor.com/pricing)、[模型与价格](https://cursor.com/docs/models-and-pricing)、[价格与方案](https://cursor.com/help/account-and-billing/pricing)。现行个人方案是 Free、Plus、Premium、Super、Ultra。包含额度是 Plus 的倍数（Plus 为基础周池，Premium 4×，Super 15×，Ultra 50×），不是已经停用的 premium requests 次数。官方没有公布 Plus 基础池的绝对请求次数或美元上限，Windows 界面不显示这类推测数字。
-
-旧档 Pro、Pro+、Ultra，以及 Teams Standard / Teams Premium，仍可能出现在已有订阅上。它们继续用两个按月重置的池：Cursor Models 和 Other Models。Pro 没有被改名为 Premium；新方案里与它最接近的是 Premium，价格和额度都不同。
-
-Windows 的现行周池和旧月模型池按模型池百分比显示。`autoPercentUsed` 是 Cursor 模型池已用百分比，字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`；Windows 旧档的其他模型池使用 `apiPercentUsed`。Windows 托盘、悬浮提示和详情统一四舍五入为整数百分比。Windows 仅在接口没有返回主模型池比例时，才回退到 `includedSpend / limit`。Windows 现行档位不把 `apiPercentUsed` 当成已包含的「其他模型」额度，因为第三方模型不再包含在周池里。
+Windows 按剩余比例设置黄色（≤30%）和红色（≤10%）提示，无法确定时显示缺失状态。
 
 ## macOS 1.5.1 额度口径
 
@@ -108,11 +91,13 @@ Windows 的现行周池和旧月模型池按模型池百分比显示。`autoPerc
 
 额外池优先使用信用额度接口的 `creditBalanceCents / totalCents`；没有可用信用额度时回退到预付额度的 `availableCents / fundedCents`。详情卡显示余额 / 额度池总额，状态栏第二行在金额数据可用时显示对应剩余比例。旧月套餐也兼容 `apiLimit - apiSpend` 这组直接金额字段。只有 `apiPercentUsed` 时不会据此推算金额；金额数据缺失时详情显示 `— / —`，额外池不继承主卡的周重置时间。
 
-## Windows 额度口径
+## Windows 1.5.1 额度口径
 
-Windows 按套餐档位展示额度。现行方案的主池按周重置；旧档的 Cursor Models 和 Other Models 仍按月分别重置。根据 [官方模型与额度说明](https://cursor.com/docs/models-and-pricing#usage-pools)，Windows 第一行使用 `100 - autoPercentUsed` 计算 Cursor 模型池剩余；旧档第二行按 `100 - apiPercentUsed` 计算其他模型池剩余。接口的这些字段直接使用百分数点，例如 `0.7` 表示已用 `0.7%`，剩余为 `99.3%`。托盘、悬浮提示和详情统一四舍五入为整数百分比。
+接口的 `includedUsagePeriod` 表示 weekly 时，主卡使用当前周期接口的 `100 - planUsage.totalPercentUsed`，重置时间使用 `includedUsageResetsAt`；没有可信周数据时显示缺失状态，不用旧月摘要覆盖。非周套餐优先根据返回的额度金额计算，金额缺失时回退至可用的模型池百分比。
 
-`includedSpend / limit` 是另一种金额额度口径，可能已达到上限，而模型池仍有剩余；Windows 仅在接口未返回主模型池比例时回退到这一口径。
+额外池优先使用信用额度的 `creditBalanceCents / totalCents`，没有可用信用额度时回退至预付额度的 `availableCents / fundedCents`；旧月套餐也兼容 `apiLimit - apiSpend` 这组金额字段。金额缺失时不根据百分比推算，零余额仍显示为零。额外池不继承主卡的周重置时间。
+
+Windows 快照格式升级为 3，旧版 Windows 快照不会迁移；升级后需成功刷新一次才能建立新快照。刷新失败时，如有新格式快照则显示快照和错误信息。并发刷新会合并，候选凭据各自分配请求预算并共享总时限。只有部分额度可用时显示「部分」及缺失原因。
 
 ## macOS 安装（推荐）
 
@@ -188,7 +173,13 @@ chmod +x "./Mac/Codings/Start-CursorQuotaPet.command" "./Mac/Codings/build-mac.s
 
 运行 [`Windows/Packages/CursorQuotaPet-Setup.exe`](Windows/Packages/CursorQuotaPet-Setup.exe)。若本机已经装过，会装回原来的目录；否则默认安装到 `%LOCALAPPDATA%\Programs\Cursor仪表盘`，并创建开始菜单与桌面快捷方式。
 
-这是托盘应用：启动后请看任务栏通知区域。鼠标放在图标上时，两行余额出现在图标正上方。左键打开详情，详情同样贴在图标上方。
+这是托盘应用：启动后请看任务栏通知区域。鼠标放在图标上时，图标上方显示两行剩余比例；左键打开详情。
+
+### Windows 卸载
+
+在 Windows「设置 → 应用 → 已安装的应用」中找到 **Cursor仪表盘**，选择「卸载」；也可以运行安装目录中的 `Uninstall.exe`。卸载会移除本工具的程序文件、对应快捷方式及系统登记，保留 Cursor 编辑器、独立保存的登录信息和缓存，以及安装目录中的未知用户文件。
+
+`Windows/Codings/install.ps1` 同样通过正式安装包安装，包含系统卸载入口。
 
 ### 从源码编译
 
@@ -201,6 +192,17 @@ cd Windows\Codings
 ```
 
 安装包输出到 `Windows/Packages/CursorQuotaPet-Setup.exe`。
+
+自检与离线外观预览：
+
+```powershell
+.\CursorQuotaPet.exe --self-test
+.\CursorQuotaPet.exe --preview-ui=normal --appearance=light
+.\CursorQuotaPet.exe --preview-ui=warning --appearance=dark
+.\CursorQuotaPet.exe --render-previews
+```
+
+预览支持 `normal`、`warning`、`critical`、`empty`、`snapshot`、`error`、`partial` 七种状态和 `light` / `dark` 外观，不读取登录态或快照，也不联网；预览中的刷新按钮不执行刷新。批量预览输出到 `Windows/Previews/1.5.1/`。`--probe` 则使用真实登录态与网络：完整取数时 `Status` 为 `ok`；主额度缺失而保留额外池时为 `partial`，退出码为 1；刷新失败而回退到快照时为 `snapshot`，退出码为 1；无可用数据时为 `unavailable`，退出码为 1。
 
 ## 配置
 
@@ -243,19 +245,15 @@ Cursor 用户 API Key（`crsr_…`）**不能**读取用量，请不要把它当
 
 ## 常见问题
 
-**Windows 状态栏一直是「本周 —」或「内置 —」**
+**Windows 额度一直显示「—」**
 
-先确认 Cursor 已登录。可运行 `--probe` 查看是「未找到登录态」还是接口报错。登录后等几秒，或右键「立即刷新」。
+先确认 Cursor 已登录，可运行 `--probe` 查看未找到登录态、接口错误或快照状态。登录后等待刷新，或右键「立即刷新」。周限额缺少可信当前周期数据时会显示「—」；额外额度缺少金额时显示 `— / —`。
 
 **提示会话过期 / 未认证**  
 在 Cursor 中重新登录，或按上面步骤更新 `CURSOR_SESSION_TOKEN` / 配置文件。Cookie 和本地 `accessToken` 都会过期。
 
 **数字和官网页不一致**  
-Windows 现行档位的第一行应对齐 Cursor 编辑器设置或 [Cursor 官方用量页](https://cursor.com/dashboard/usage)中的 Cursor 模型周池剩余比例。第二行不是另一个包含额度：Premium 及以上是预付余额或「按量」，Plus / Free 是「不含」。旧档第一行对齐 Cursor Models，第二行对齐 Other Models。金额栏的 `included usage` 不能替代模型池剩余。本工具约 30 秒刷新一次；安装更新后请重新启动托盘程序。
-
-**Windows 第二行不是百分比**
-
-Plus 和 Free 不包含第三方模型，第二行显示「不含」。Premium、Super、Ultra、Teams 和 Enterprise 的第三方模型按 API 标价从预付额度扣除，第二行显示「按量」或接口返回的余额。只有旧档才会把第二行显示成「其他」百分比。
+请核对套餐周期、主限额和额外额度池的口径，并以 [Cursor 官方用量页](https://cursor.com/dashboard/usage)为准。本工具约 30 秒刷新一次；安装更新后请重新启动托盘程序。接口暂时失败时显示的可能是标记为「快照」的上次数据。
 
 **是否安全？**  
 令牌只在本机读取，请求只发往 `cursor.com` 与 `api2.cursor.sh`。应用不把令牌写入项目目录或自检输出。请不要把 `session-token` 文件或环境变量提交到 git。
