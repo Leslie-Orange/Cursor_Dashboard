@@ -28,16 +28,7 @@ internal static class CursorQuotaPetMain
             Environment.Exit(RunSelfTest(args));
         }
 
-        try
-        {
-            ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol
-                | (SecurityProtocolType)3072
-                | (SecurityProtocolType)12288;
-        }
-        catch
-        {
-        }
-        ServicePointManager.Expect100Continue = false;
+        CursorUsageClient.ConfigureNetwork();
 
         bool created;
         Mutex mutex = new Mutex(true, MutexName, out created);
@@ -76,13 +67,7 @@ internal static class CursorQuotaPetMain
 
     private static int RunProbe()
     {
-        try
-        {
-            ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol | (SecurityProtocolType)3072;
-        }
-        catch
-        {
-        }
+        CursorUsageClient.ConfigureNetwork();
         CursorUsageClient client = new CursorUsageClient();
         QuotaSnapshot snapshot = client.RefreshBlocking();
         if (snapshot == null)
@@ -128,8 +113,9 @@ internal static class CursorQuotaPetMain
             TestAnchor();
             TestDetailLayout();
             TestTrayTipLayout();
-            TestDpiCursorSet();
-            TestLocator();
+        TestDpiCursorSet();
+        TestAppMark();
+        TestLocator();
             TestHover();
             TestSqlite();
             if (Has(args, "--preview"))
@@ -584,11 +570,11 @@ internal static class CursorQuotaPetMain
         Expect(point.X, 1470, "tip x");
         Expect(point.Y, 984, "tip y");
 
-        Size window = new Size(422, 328);
-        Size content = new Size(386, 292);
+        Size window = new Size(422, 316);
+        Size content = new Size(386, 280);
         Point popup = PopupAnchor.Above(icon, window, 18, 18, content, 8, screen);
         Expect(popup.X, 1309, "popup x");
-        Expect(popup.Y, 714, "popup y");
+        Expect(popup.Y, 726, "popup y");
 
         Rectangle overflow = new Rectangle(1488, 890, 44, 44);
         Point aboveOverflow = PopupAnchor.Above(overflow, tip, 0, 0, tip, 8, screen);
@@ -644,9 +630,9 @@ internal static class CursorQuotaPetMain
             }
             previousSize = layout.WindowSize;
 
-            if (dpi == 192 && layout.WindowSize != new Size(844, 656))
+            if (dpi == 192 && layout.WindowSize != new Size(844, 632))
             {
-                throw new Exception("192 dpi detail size expected 844x656 actual "
+                throw new Exception("192 dpi detail size expected 844x632 actual "
                     + layout.WindowSize.Width.ToString(CultureInfo.InvariantCulture) + "x"
                     + layout.WindowSize.Height.ToString(CultureInfo.InvariantCulture));
             }
@@ -683,15 +669,15 @@ internal static class CursorQuotaPetMain
                 throw new Exception("detail bitmap size at " + dpi.ToString(CultureInfo.InvariantCulture) + " dpi");
             }
             Rectangle expectedRefresh = layout.ToPixels(new Rectangle(
-                GlassTheme.Shadow + GlassTheme.PanelWidth - 76,
-                GlassTheme.Shadow + 18,
-                28,
-                28));
+                GlassTheme.Shadow + GlassTheme.PanelWidth - GlassTheme.ButtonTrailing - GlassTheme.ButtonSize * 2 - GlassTheme.ButtonGap,
+                GlassTheme.Shadow + GlassTheme.HeaderTop,
+                GlassTheme.ButtonSize,
+                GlassTheme.ButtonSize));
             Rectangle expectedClose = layout.ToPixels(new Rectangle(
-                GlassTheme.Shadow + GlassTheme.PanelWidth - 42,
-                GlassTheme.Shadow + 18,
-                28,
-                28));
+                GlassTheme.Shadow + GlassTheme.PanelWidth - GlassTheme.ButtonTrailing - GlassTheme.ButtonSize,
+                GlassTheme.Shadow + GlassTheme.HeaderTop,
+                GlassTheme.ButtonSize,
+                GlassTheme.ButtonSize));
             ExpectRectangle(refresh, expectedRefresh, "refresh hit area");
             ExpectRectangle(close, expectedClose, "close hit area");
             Rectangle bitmapBounds = new Rectangle(Point.Empty, bitmap.Size);
@@ -1017,24 +1003,54 @@ internal static class CursorQuotaPetMain
         Console.WriteLine("sqlite=ok plan=" + (plan ?? "") + " token=" + (string.IsNullOrEmpty(token) ? "no" : "yes"));
     }
 
+    private static void TestAppMark()
+    {
+        using (Bitmap app = AppMarkPainter.Render(256, false, null, null))
+        using (Bitmap tray = AppMarkPainter.Render(32, true, 74, 100))
+        {
+            if (app.Width != 256 || app.Height != 256)
+            {
+                throw new Exception("app mark size");
+            }
+            if (tray.Width != 32 || tray.Height != 32)
+            {
+                throw new Exception("tray mark size");
+            }
+            if (app.GetPixel(128, 128).A < 200)
+            {
+                throw new Exception("app mark is transparent at center");
+            }
+            if (tray.GetPixel(16, 16).A < 200)
+            {
+                throw new Exception("tray mark is transparent at center");
+            }
+        }
+        using (Icon icon = TrayIconFactory.Create(74, 100))
+        {
+            if (icon.Width < 16 || icon.Height < 16)
+            {
+                throw new Exception("tray icon is empty");
+            }
+        }
+    }
+
     private static QuotaSnapshot CreatePreviewSnapshot()
     {
         QuotaWindow primary = new QuotaWindow();
-        primary.Badge = "内置";
-        primary.Title = "内置模型剩余";
+        primary.Badge = "本周";
+        primary.Title = "Cursor 模型剩余";
         primary.Remaining = 74;
         primary.Used = 26;
-        primary.WindowMinutes = 30 * 24 * 60;
-        primary.ResetAt = (DateTime.UtcNow.AddDays(12) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        primary.Detail = "4× Plus";
+        primary.Schedule = "每周重置";
         QuotaWindow secondary = new QuotaWindow();
-        secondary.Badge = "其他";
-        secondary.Title = "其他模型剩余";
-        secondary.Remaining = 100;
-        secondary.Used = 0;
-        secondary.WindowMinutes = primary.WindowMinutes;
-        secondary.ResetAt = primary.ResetAt;
+        secondary.Badge = "预付";
+        secondary.Title = "第三方预付";
+        secondary.Detail = "按量";
+        secondary.Schedule = "用完为止";
         QuotaSnapshot snapshot = new QuotaSnapshot();
-        snapshot.PlanType = "pro";
+        snapshot.PlanType = "premium";
+        snapshot.PlanNote = "4× Plus · 每周";
         snapshot.Primary = primary;
         snapshot.Secondary = secondary;
         snapshot.SampledAt = DateTime.Now;
@@ -1046,9 +1062,18 @@ internal static class CursorQuotaPetMain
     {
         Rectangle refresh;
         Rectangle close;
-        using (Bitmap bitmap = DetailPainter.Render(CreatePreviewSnapshot(), "实时预览", layout, false, false, out refresh, out close))
+        using (Bitmap bitmap = DetailPainter.Render(CreatePreviewSnapshot(), "更新于 14:15", layout, false, false, out refresh, out close))
         {
             bitmap.Save(path, ImageFormat.Png);
+        }
+        string folder = Path.GetDirectoryName(path);
+        using (Bitmap app = AppMarkPainter.Render(256, false, null, null))
+        {
+            app.Save(Path.Combine(folder, "cursor-quota-app-icon.png"), ImageFormat.Png);
+        }
+        using (Bitmap tray = AppMarkPainter.Render(32, true, 74, null))
+        {
+            tray.Save(Path.Combine(folder, "cursor-quota-tray-icon.png"), ImageFormat.Png);
         }
     }
 

@@ -1037,7 +1037,6 @@ internal static class QuotaFormatter
         string stamp = snapshot == null
             ? ""
             : snapshot.SampledAt.ToLocalTime().ToString(ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm", CultureInfo.InvariantCulture);
-        string source = snapshot != null && snapshot.SourceName == "cursor-api" ? "实时" : "快照";
         string stale = ageMinutes >= 10 ? " · 可能过期" : "";
         string brief = ShortError(connectionError);
         string error = snapshot != null && snapshot.SourceName == "cursor-api" || brief.Length == 0 ? "" : " · " + brief;
@@ -1045,7 +1044,7 @@ internal static class QuotaFormatter
         {
             return brief.Length == 0 ? "正在读取 Cursor 登录态…" : brief;
         }
-        return source + " " + stamp + stale + error;
+        return "更新于 " + stamp + stale + error;
     }
 
     public static string ShortError(string error)
@@ -1066,9 +1065,9 @@ internal static class QuotaFormatter
     {
         if (snapshot == null)
         {
-            return "WAIT";
+            return "等待";
         }
-        return snapshot.SourceName == "cursor-api" ? "LIVE" : "SNAPSHOT";
+        return snapshot.SourceName == "cursor-api" ? "实时" : "快照";
     }
 
     private static string Capitalize(string raw)
@@ -1709,20 +1708,121 @@ internal static class SessionStore
     public static SessionInfo Load()
     {
         string localPlan = SqliteValue("cursorAuth/stripeMembershipType");
+        SessionInfo best = null;
         string env = Normalize(Environment.GetEnvironmentVariable("CURSOR_SESSION_TOKEN"));
         if (env != null)
         {
-            return Make(env, "env", localPlan);
+            best = Prefer(best, Make(env, "env", localPlan));
         }
         string file = ReadFile(ConfigPath());
         if (file != null)
         {
-            return Make(file, "config", localPlan);
+            best = Prefer(best, Make(file, "config", localPlan));
         }
-        string app = SqliteValue("cursorAuth/accessToken");
+        string app = FirstSqliteToken("cursorAuth/accessToken", "cursorAuth/cachedAccessToken", "cursorAuth/webAccessToken");
         if (app != null)
         {
-            return Make(app, "cursor-app", localPlan);
+            best = Prefer(best, Make(app, "cursor-app", localPlan));
+        }
+        string authJson = ReadAuthJson();
+        if (authJson != null)
+        {
+            best = Prefer(best, Make(authJson, "auth.json", localPlan));
+        }
+        return best;
+    }
+
+    private static SessionInfo Prefer(SessionInfo current, SessionInfo candidate)
+    {
+        if (candidate == null)
+        {
+            return current;
+        }
+        if (current == null || JwtExpired(current.Token) && !JwtExpired(candidate.Token))
+        {
+            return candidate;
+        }
+        return current;
+    }
+
+    private static bool JwtExpired(string token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return true;
+        }
+        string jwt = BearerToken(token);
+        string[] parts = jwt.Split('.');
+        if (parts.Length < 2)
+        {
+            return false;
+        }
+        try
+        {
+            string payload = parts[1].Replace('-', '+').Replace('_', '/');
+            int remainder = payload.Length % 4;
+            if (remainder > 0)
+            {
+                payload = payload + new string('=', 4 - remainder);
+            }
+            object parsed = new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(Convert.FromBase64String(payload)));
+            double? exp = JsonValue.Number(JsonValue.Get(JsonValue.Map(parsed), "exp"));
+            if (!exp.HasValue)
+            {
+                return false;
+            }
+            double now = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            return exp.Value + 30 < now;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string FirstSqliteToken(params string[] keys)
+    {
+        if (keys == null)
+        {
+            return null;
+        }
+        for (int i = 0; i < keys.Length; i++)
+        {
+            string value = SqliteValue(keys[i]);
+            if (value != null)
+            {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static string ReadAuthJson()
+    {
+        string[] paths = new string[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor", "auth.json"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cursor", "auth.json")
+        };
+        for (int i = 0; i < paths.Length; i++)
+        {
+            if (!File.Exists(paths[i]))
+            {
+                continue;
+            }
+            try
+            {
+                object parsed = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(paths[i], Encoding.UTF8));
+                string token = JsonValue.Text(JsonValue.Get(JsonValue.Map(parsed), "accessToken", "token"));
+                token = Normalize(token);
+                if (token != null)
+                {
+                    return token;
+                }
+            }
+            catch
+            {
+            }
         }
         return null;
     }
@@ -2011,6 +2111,38 @@ internal sealed class CursorUsageClient
 {
     public string CurrentError = "";
     private bool _inflight;
+    private bool _pending;
+
+    public bool Busy
+    {
+        get { return _inflight; }
+    }
+
+    static CursorUsageClient()
+    {
+        ConfigureNetwork();
+    }
+
+    public static void ConfigureNetwork()
+    {
+        try
+        {
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288;
+        }
+        catch
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            }
+            catch
+            {
+            }
+        }
+        ServicePointManager.Expect100Continue = false;
+        ServicePointManager.DefaultConnectionLimit = Math.Max(16, ServicePointManager.DefaultConnectionLimit);
+    }
 
     public QuotaSnapshot RefreshBlocking()
     {
@@ -2033,10 +2165,11 @@ internal sealed class CursorUsageClient
     {
         if (_inflight)
         {
+            _pending = true;
             return;
         }
         _inflight = true;
-        ThreadPool.QueueUserWorkItem(delegate
+        Thread worker = new Thread(delegate()
         {
             QuotaSnapshot snapshot = null;
             string error = "";
@@ -2058,12 +2191,23 @@ internal sealed class CursorUsageClient
             string capturedError = error;
             try
             {
-                ui.BeginInvoke((Action)delegate { completed(captured, capturedError); });
+                ui.BeginInvoke((Action)delegate
+                {
+                    completed(captured, capturedError);
+                    if (_pending)
+                    {
+                        _pending = false;
+                        RefreshAsync(ui, completed);
+                    }
+                });
             }
             catch
             {
+                _inflight = false;
             }
         });
+        worker.IsBackground = true;
+        worker.Start();
     }
 
     private QuotaSnapshot RefreshOnQueue()
@@ -2082,13 +2226,15 @@ internal sealed class CursorUsageClient
             Slot("POST", "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo", bearer, null, true),
             Slot("GET", "https://cursor.com/api/usage-summary", null, cookie, false),
             Slot("GET", "https://api2.cursor.sh/auth/usage", bearer, null, false),
-            Slot("GET", "https://api2.cursor.sh/auth/full_stripe_profile", bearer, null, false)
+            Slot("GET", "https://api2.cursor.sh/auth/full_stripe_profile", bearer, null, false),
+            Slot("POST", "https://cursor.com/api/dashboard/get-current-period-usage", null, cookie, false),
+            Slot("POST", "https://cursor.com/api/dashboard/get-plan-info", null, cookie, false)
         };
         CountdownEvent done = new CountdownEvent(slots.Length);
         for (int i = 0; i < slots.Length; i++)
         {
             FetchSlot slot = slots[i];
-            ThreadPool.QueueUserWorkItem(delegate(object state)
+            Thread thread = new Thread(delegate(object state)
             {
                 FetchSlot item = (FetchSlot)state;
                 try
@@ -2103,12 +2249,14 @@ internal sealed class CursorUsageClient
                 {
                     done.Signal();
                 }
-            }, slot);
+            });
+            thread.IsBackground = true;
+            thread.Start(slot);
         }
-        done.Wait(18000);
+        done.Wait(20000);
         QuotaSnapshot snapshot = QuotaParser.Snapshot(
-            slots[0].Json,
-            slots[1].Json,
+            slots[0].Json ?? slots[5].Json,
+            slots[1].Json ?? slots[6].Json,
             slots[2].Json,
             slots[3].Json,
             slots[4].Json,
@@ -2145,16 +2293,21 @@ internal sealed class CursorUsageClient
     {
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(slot.Url);
         request.Method = slot.Method;
-        request.Timeout = 15000;
-        request.ReadWriteTimeout = 15000;
+        request.Timeout = 12000;
+        request.ReadWriteTimeout = 12000;
+        request.KeepAlive = true;
         request.Accept = "application/json";
-        request.UserAgent = "CursorQuotaPet/1.4";
+        request.UserAgent = "CursorQuotaPet/1.5";
         request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
-        if (slot.Connect || slot.Method == "POST")
+        request.ServicePoint.Expect100Continue = false;
+        request.ServicePoint.ConnectionLimit = Math.Max(16, request.ServicePoint.ConnectionLimit);
+        if (slot.Method == "POST" || slot.Connect)
         {
             request.ContentType = "application/json";
+        }
+        if (slot.Connect)
+        {
             request.Headers["Connect-Protocol-Version"] = "1";
-            request.Headers["Origin"] = "https://cursor.com";
         }
         if (!string.IsNullOrEmpty(slot.Bearer))
         {
@@ -2163,6 +2316,9 @@ internal sealed class CursorUsageClient
         if (!string.IsNullOrEmpty(slot.Cookie))
         {
             request.Headers["Cookie"] = "WorkosCursorSessionToken=" + slot.Cookie;
+        }
+        if (slot.Connect || slot.Method == "POST" || !string.IsNullOrEmpty(slot.Cookie))
+        {
             request.Headers["Origin"] = "https://cursor.com";
         }
         if (slot.Method == "POST")
@@ -2325,6 +2481,10 @@ internal sealed class QuotaModel
     public void Refresh()
     {
         Fallback = SnapshotCache.Load();
+        if (string.IsNullOrEmpty(ConnectionError) || Display != null)
+        {
+            FooterText = "正在刷新…";
+        }
         Publish(true);
         _client.RefreshAsync(Ui, delegate(QuotaSnapshot snapshot, string error)
         {
