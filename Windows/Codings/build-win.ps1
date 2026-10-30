@@ -10,16 +10,33 @@ $manifest = Join-Path $root "app.manifest"
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw "找不到 .NET Framework C# 编译器：$compiler"
 }
-foreach ($required in @($icon, $manifest)) {
-    if (-not (Test-Path -LiteralPath $required)) {
-        throw "缺少文件：$required"
-    }
+if (-not (Test-Path -LiteralPath $manifest)) {
+    throw "缺少文件：$manifest"
 }
+
+$iconCompiler = Join-Path $root "MakeAppIcon.cs"
+$iconShared = Join-Path $root "AppIcon.cs"
+$iconTool = Join-Path $root "MakeAppIcon.exe"
+& $compiler /nologo /target:exe /optimize+ /codepage:65001 `
+    /out:$iconTool `
+    /reference:System.dll `
+    /reference:System.Drawing.dll `
+    $iconCompiler `
+    $iconShared
+if ($LASTEXITCODE -ne 0) {
+    throw "图标工具编译失败：exit $LASTEXITCODE"
+}
+& $iconTool $icon
+if ($LASTEXITCODE -ne 0) {
+    throw "应用图标生成失败：exit $LASTEXITCODE"
+}
+Remove-Item -LiteralPath $iconTool -Force -ErrorAction SilentlyContinue
 
 $sources = @(
     "Program.cs",
     "QuotaData.cs",
-    "QuotaUi.cs"
+    "QuotaUi.cs",
+    "AppIcon.cs"
 ) | ForEach-Object { Join-Path $root $_ }
 
 & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `

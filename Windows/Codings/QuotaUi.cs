@@ -11,19 +11,21 @@ using System.Windows.Forms;
 internal static class GlassTheme
 {
     public static readonly Color Mint = Color.FromArgb(22, 148, 108);
-    public static readonly Color Cyan = Color.FromArgb(125, 211, 252);
-    public static readonly Color Peach = Color.FromArgb(255, 183, 162);
-    public static readonly Color Lavender = Color.FromArgb(196, 181, 253);
     public static readonly Color Slate = Color.FromArgb(36, 48, 62);
     public static readonly Color SlateMuted = Color.FromArgb(92, 106, 122);
     public static readonly Color Warning = Color.FromArgb(245, 153, 15);
     public static readonly Color Danger = Color.FromArgb(240, 74, 77);
     public const int PanelWidth = 386;
-    public const int PanelHeight = 292;
+    public const int PanelHeight = 280;
     public const int Shadow = 18;
-    public const int PanelRadius = 28;
+    public const int PanelRadius = 30;
+    public const int PanelInset = 14;
     public const int CardRadius = 16;
     public const int TipGap = 8;
+    public const int HeaderTop = 16;
+    public const int ButtonSize = 28;
+    public const int ButtonGap = 6;
+    public const int ButtonTrailing = 16;
 
     public static Color Emphasis(double? remaining)
     {
@@ -417,10 +419,9 @@ internal static class DetailPainter
             DrawHeader(g, panel, snapshot, out refresh, out close);
             if (refreshHot) DrawIconButton(g, refresh, true, true);
             if (closeHot) DrawIconButton(g, close, true, false);
-            QuotaWindow primary = snapshot != null ? snapshot.Primary : Placeholder("内置");
-            QuotaWindow secondary = snapshot != null ? snapshot.Secondary : Placeholder("其他");
-            DrawCard(g, new Rectangle(panel.X + 14, panel.Y + 70, panel.Width - 28, 82), primary);
-            DrawCard(g, new Rectangle(panel.X + 14, panel.Y + 160, panel.Width - 28, 82), secondary);
+            QuotaWindow primary = snapshot != null ? snapshot.Primary : Placeholder();
+            QuotaWindow secondary = snapshot != null ? snapshot.Secondary : Placeholder();
+            DrawInsetCards(g, panel, primary, secondary);
             DrawFooter(g, panel, snapshot, footer);
         }
         refresh = layout.ToPixels(refresh);
@@ -428,91 +429,90 @@ internal static class DetailPainter
         return bitmap;
     }
 
-    private static QuotaWindow Placeholder(string badge)
+    private static QuotaWindow Placeholder()
     {
         QuotaWindow window = new QuotaWindow();
-        window.Badge = badge;
+        window.Badge = "—";
         window.Title = "等待额度数据";
         return window;
     }
 
     private static void DrawPanel(Graphics g, Rectangle panel)
     {
+        DrawShadow(g, panel);
         using (GraphicsPath path = Rounded(panel, GlassTheme.PanelRadius))
         {
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(248, 236, 244, 248)))
+            using (LinearGradientBrush fill = new LinearGradientBrush(
+                panel,
+                Color.FromArgb(236, 248, 250, 252),
+                Color.FromArgb(228, 236, 240, 246),
+                LinearGradientMode.Vertical))
             {
                 g.FillPath(fill, path);
             }
-            GraphicsState state = g.Save();
-            try
-            {
-                g.SetClip(path, CombineMode.Intersect);
-                DrawBlob(g, new Rectangle(panel.X - 70, panel.Y - 80, 240, 240), Color.FromArgb(90, GlassTheme.Cyan));
-                DrawBlob(g, new Rectangle(panel.Right - 150, panel.Y, 250, 250), Color.FromArgb(80, GlassTheme.Peach));
-                DrawBlob(g, new Rectangle(panel.Right - 180, panel.Y + 120, 220, 220), Color.FromArgb(70, GlassTheme.Lavender));
-            }
-            finally
-            {
-                g.Restore(state);
-            }
-            using (Pen border = new Pen(Color.FromArgb(220, Color.White), 1.2f))
+            using (Pen border = new Pen(Color.FromArgb(42, 20, 28, 40), 1f))
             {
                 g.DrawPath(border, path);
+            }
+            using (Pen highlight = new Pen(Color.FromArgb(90, Color.White), 1.1f))
+            {
+                g.DrawPath(highlight, path);
+            }
+        }
+    }
+
+    private static void DrawShadow(Graphics g, Rectangle panel)
+    {
+        for (int i = 8; i >= 1; i--)
+        {
+            Rectangle shadow = Rectangle.Inflate(panel, i, i);
+            shadow.Offset(0, Math.Max(1, i / 2));
+            using (GraphicsPath path = Rounded(shadow, GlassTheme.PanelRadius + i))
+            using (SolidBrush brush = new SolidBrush(Color.FromArgb(4 + i, 18, 24, 36)))
+            {
+                g.FillPath(brush, path);
             }
         }
     }
 
     private static void DrawHeader(Graphics g, Rectangle panel, QuotaSnapshot snapshot, out Rectangle refresh, out Rectangle close)
     {
-        Rectangle icon = new Rectangle(panel.X + 18, panel.Y + 16, 36, 36);
-        using (GraphicsPath circle = new GraphicsPath())
-        {
-            circle.AddEllipse(icon);
-            using (LinearGradientBrush brush = new LinearGradientBrush(icon, Color.FromArgb(97, 158, 255), Color.FromArgb(125, 92, 245), LinearGradientMode.ForwardDiagonal))
-            {
-                g.FillPath(brush, circle);
-            }
-        }
-        using (Pen gauge = new Pen(Color.White, 2.2f))
-        {
-            gauge.StartCap = LineCap.Round;
-            gauge.EndCap = LineCap.Round;
-            g.DrawArc(gauge, icon.X + 8, icon.Y + 9, 20, 20, 140, 260);
-            g.FillEllipse(Brushes.White, icon.X + 17, icon.Y + 17, 3, 3);
-        }
-
         string title = QuotaFormatter.PlanTitle(snapshot != null ? snapshot.PlanType : null);
-        using (Font font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (Font font = new Font("Microsoft YaHei UI", 15f, FontStyle.Bold, GraphicsUnit.Pixel))
         using (SolidBrush brush = new SolidBrush(GlassTheme.Slate))
         {
-            g.DrawString(title, font, brush, panel.X + 62, panel.Y + 16);
+            g.DrawString(title, font, brush, panel.X + 20, panel.Y + GlassTheme.HeaderTop);
         }
         string reset = snapshot != null && !string.IsNullOrEmpty(snapshot.PlanNote)
             ? snapshot.PlanNote
             : QuotaFormatter.ResetAt(snapshot != null && snapshot.Primary != null ? snapshot.Primary.ResetAt : (double?)null);
-        if (!string.IsNullOrEmpty(reset))
+        if (string.IsNullOrEmpty(reset))
         {
-            using (Font font = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
-            using (SolidBrush brush = new SolidBrush(GlassTheme.SlateMuted))
-            {
-                g.DrawString(reset, font, brush, panel.X + 62, panel.Y + 36);
-            }
+            reset = "重置时间未知";
+        }
+        using (Font font = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (SolidBrush brush = new SolidBrush(GlassTheme.SlateMuted))
+        {
+            g.DrawString(reset, font, brush, panel.X + 20, panel.Y + 36);
         }
 
-        refresh = new Rectangle(panel.Right - 76, panel.Y + 18, 28, 28);
-        close = new Rectangle(panel.Right - 42, panel.Y + 18, 28, 28);
+        close = new Rectangle(panel.Right - GlassTheme.ButtonTrailing - GlassTheme.ButtonSize, panel.Y + GlassTheme.HeaderTop, GlassTheme.ButtonSize, GlassTheme.ButtonSize);
+        refresh = new Rectangle(close.X - GlassTheme.ButtonGap - GlassTheme.ButtonSize, close.Y, GlassTheme.ButtonSize, GlassTheme.ButtonSize);
         DrawIconButton(g, refresh, false, true);
         DrawIconButton(g, close, false, false);
     }
 
     public static void DrawIconButton(Graphics g, Rectangle rect, bool hot, bool refresh)
     {
-        using (SolidBrush fill = new SolidBrush(hot ? Color.FromArgb(230, 255, 255, 255) : Color.FromArgb(170, 255, 255, 255)))
+        using (SolidBrush fill = new SolidBrush(hot ? Color.FromArgb(210, 255, 255, 255) : Color.FromArgb(48, 255, 255, 255)))
         {
             g.FillEllipse(fill, rect);
         }
-        using (Pen mark = new Pen(Color.FromArgb(210, GlassTheme.Slate), 1.6f))
+        using (Pen rim = new Pen(Color.FromArgb(hot ? 70 : 36, 20, 28, 40), 1f))
+        {
+            g.DrawEllipse(rim, rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1f, rect.Height - 1f);
+        }
+        using (Pen mark = new Pen(Color.FromArgb(200, GlassTheme.SlateMuted), 1.55f))
         {
             mark.StartCap = LineCap.Round;
             mark.EndCap = LineCap.Round;
@@ -529,28 +529,46 @@ internal static class DetailPainter
         }
     }
 
-    private static void DrawCard(Graphics g, Rectangle rect, QuotaWindow window)
+    private static void DrawInsetCards(Graphics g, Rectangle panel, QuotaWindow primary, QuotaWindow secondary)
     {
-        using (GraphicsPath path = Rounded(rect, GlassTheme.CardRadius))
-        using (SolidBrush fill = new SolidBrush(Color.FromArgb(168, 255, 255, 255)))
+        Rectangle inset = new Rectangle(panel.X + GlassTheme.PanelInset, panel.Y + 62, panel.Width - GlassTheme.PanelInset * 2, 156);
+        using (GraphicsPath path = Rounded(inset, GlassTheme.CardRadius))
+        using (SolidBrush fill = new SolidBrush(Color.FromArgb(22, 20, 28, 40)))
         {
             g.FillPath(fill, path);
         }
+        using (Pen border = new Pen(Color.FromArgb(20, 20, 28, 40), 1f))
+        using (GraphicsPath path = Rounded(inset, GlassTheme.CardRadius))
+        {
+            g.DrawPath(border, path);
+        }
 
+        int rowHeight = (inset.Height - 1) / 2;
+        DrawCardRow(g, new Rectangle(inset.X, inset.Y, inset.Width, rowHeight), primary);
+        int dividerY = inset.Y + rowHeight;
+        using (Pen divider = new Pen(Color.FromArgb(28, 20, 28, 40), 1f))
+        {
+            g.DrawLine(divider, inset.X + 77, dividerY, inset.Right - 14, dividerY);
+        }
+        DrawCardRow(g, new Rectangle(inset.X, dividerY + 1, inset.Width, inset.Bottom - dividerY - 1), secondary);
+    }
+
+    private static void DrawCardRow(Graphics g, Rectangle rect, QuotaWindow window)
+    {
         Color tint = GlassTheme.Emphasis(window != null ? window.Remaining : (double?)null);
         float progress = 0;
         if (window != null && window.Remaining.HasValue)
         {
             progress = (float)(Math.Max(0, Math.Min(100, window.Remaining.Value)) / 100.0);
         }
-        Rectangle ring = new Rectangle(rect.X + 14, rect.Y + 14, 54, 54);
-        using (Pen track = new Pen(Color.FromArgb(40, GlassTheme.Slate), 6f))
+        Rectangle ring = new Rectangle(rect.X + 14, rect.Y + (rect.Height - 50) / 2, 50, 50);
+        using (Pen track = new Pen(Color.FromArgb(36, GlassTheme.Slate), 5.5f))
         {
             g.DrawEllipse(track, ring);
         }
         if (progress > 0)
         {
-            using (Pen arc = new Pen(tint, 6f))
+            using (Pen arc = new Pen(tint, 5.5f))
             {
                 arc.StartCap = LineCap.Round;
                 arc.EndCap = LineCap.Round;
@@ -559,8 +577,8 @@ internal static class DetailPainter
         }
 
         string badge = window != null && !string.IsNullOrEmpty(window.Badge) ? window.Badge : "—";
-        using (Font font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (SolidBrush brush = new SolidBrush(Color.FromArgb(200, GlassTheme.Slate)))
+        using (Font font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (SolidBrush brush = new SolidBrush(Color.FromArgb(180, GlassTheme.Slate)))
         using (StringFormat format = new StringFormat())
         {
             format.Alignment = StringAlignment.Center;
@@ -580,16 +598,17 @@ internal static class DetailPainter
             window != null ? window.Remaining : (double?)null,
             window != null ? window.ResetAt : (double?)null,
             window != null ? window.WindowMinutes : (double?)null);
+        string side = window != null && !string.IsNullOrEmpty(window.Detail) ? window.Detail : burn;
 
-        float rightReserve = window != null && !string.IsNullOrEmpty(window.Detail) ? 118f : 92f;
-        RectangleF text = new RectangleF(rect.X + 80, rect.Y + 16, Math.Max(40, rect.Width - 80 - rightReserve), 22);
-        RectangleF sub = new RectangleF(rect.X + 80, rect.Y + 42, Math.Max(40, rect.Width - 80 - rightReserve), 22);
+        float rightReserve = 96f;
+        RectangleF text = new RectangleF(rect.X + 77, rect.Y + 16, Math.Max(40, rect.Width - 77 - rightReserve), 22);
+        RectangleF sub = new RectangleF(rect.X + 77, rect.Y + 40, Math.Max(40, rect.Width - 77 - rightReserve), 20);
         using (StringFormat format = new StringFormat())
         {
             format.Trimming = StringTrimming.EllipsisCharacter;
             format.FormatFlags = StringFormatFlags.NoWrap;
-            using (Font titleFont = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (Font mutedFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (Font titleFont = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (Font mutedFont = new Font("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel))
             using (SolidBrush titleBrush = new SolidBrush(GlassTheme.Slate))
             using (SolidBrush mutedBrush = new SolidBrush(GlassTheme.SlateMuted))
             {
@@ -598,19 +617,18 @@ internal static class DetailPainter
             }
         }
 
-        using (Font percentFont = new Font("Microsoft YaHei UI", 22f, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (Font burnFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (Font percentFont = new Font("Microsoft YaHei UI", 24f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (Font sideFont = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular, GraphicsUnit.Pixel))
         using (SolidBrush percentBrush = new SolidBrush(tint))
-        using (SolidBrush mutedBrush = new SolidBrush(GlassTheme.SlateMuted))
+        using (SolidBrush mutedBrush = new SolidBrush(Color.FromArgb(160, GlassTheme.SlateMuted)))
         using (StringFormat format = new StringFormat())
         {
             format.Alignment = StringAlignment.Far;
             format.LineAlignment = StringAlignment.Near;
-            RectangleF percentBox = new RectangleF(rect.Right - 96, rect.Y + 12, 82, 28);
-            RectangleF burnBox = new RectangleF(rect.Right - 108, rect.Y + 44, 94, 20);
-            string side = window != null && !string.IsNullOrEmpty(window.Detail) ? window.Detail : burn;
+            RectangleF percentBox = new RectangleF(rect.Right - 108, rect.Y + 12, 94, 30);
+            RectangleF sideBox = new RectangleF(rect.Right - 116, rect.Y + 44, 102, 18);
             g.DrawString(percent, percentFont, percentBrush, percentBox, format);
-            g.DrawString(side, burnFont, mutedBrush, burnBox, format);
+            g.DrawString(side, sideFont, mutedBrush, sideBox, format);
         }
     }
 
@@ -620,35 +638,22 @@ internal static class DetailPainter
         Color tint = live ? GlassTheme.Mint : GlassTheme.Warning;
         string badge = QuotaFormatter.StatusBadge(snapshot);
         int y = panel.Bottom - 28;
-        using (SolidBrush dot = new SolidBrush(tint))
-        {
-            g.FillEllipse(dot, panel.X + 18, y + 4, 7, 7);
-        }
-        using (Font font = new Font("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (Font badgeFont = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (Font font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (Font badgeFont = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold, GraphicsUnit.Pixel))
         using (SolidBrush muted = new SolidBrush(GlassTheme.SlateMuted))
-        using (SolidBrush badgeBrush = new SolidBrush(tint))
+        using (SolidBrush badgeBrush = new SolidBrush(Color.FromArgb(200, GlassTheme.SlateMuted)))
         using (StringFormat format = new StringFormat())
         {
             format.Trimming = StringTrimming.EllipsisCharacter;
             format.FormatFlags = StringFormatFlags.NoWrap;
-            g.DrawString(footer ?? "", font, muted, new RectangleF(panel.X + 32, y, panel.Width - 120, 18), format);
+            g.DrawString(footer ?? "", font, muted, new RectangleF(panel.X + 20, y + 2, panel.Width - 108, 16), format);
             SizeF size = g.MeasureString(badge, badgeFont);
-            g.DrawString(badge, badgeFont, badgeBrush, panel.Right - size.Width - 18, y);
-        }
-    }
-
-    private static void DrawBlob(Graphics g, Rectangle rect, Color color)
-    {
-        using (GraphicsPath path = new GraphicsPath())
-        {
-            path.AddEllipse(rect);
-            using (PathGradientBrush brush = new PathGradientBrush(path))
+            float badgeX = panel.Right - size.Width - 20;
+            using (SolidBrush dot = new SolidBrush(tint))
             {
-                brush.CenterColor = color;
-                brush.SurroundColors = new Color[] { Color.FromArgb(0, color) };
-                g.FillPath(brush, path);
+                g.FillEllipse(dot, badgeX - 10, y + 6, 6, 6);
             }
+            g.DrawString(badge, badgeFont, badgeBrush, badgeX, y + 2);
         }
     }
 
@@ -779,6 +784,11 @@ internal sealed class QuotaPopupForm : Form
         Deactivate += delegate
         {
             if ((DateTime.UtcNow - _shownAtUtc).TotalMilliseconds < 250)
+            {
+                return;
+            }
+            Point client = PointToClient(Control.MousePosition);
+            if (_refreshRect.Contains(client) || _closeRect.Contains(client) || InsidePanel(client))
             {
                 return;
             }
@@ -1140,7 +1150,7 @@ internal static class TrayTipPainter
             path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
             path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
             path.CloseFigure();
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(235, 36, 48, 62)))
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(228, 36, 48, 62)))
             {
                 g.FillPath(fill, path);
             }
@@ -1464,34 +1474,8 @@ internal static class TrayIconFactory
 {
     public static Icon Create(double? primary, double? secondary)
     {
-        using (Bitmap bitmap = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
-        using (Graphics g = Graphics.FromImage(bitmap))
-        using (Font font = new Font("Segoe UI Semibold", 9f, FontStyle.Regular, GraphicsUnit.Pixel))
-        using (SolidBrush primaryBrush = new SolidBrush(GlassTheme.Emphasis(primary)))
-        using (SolidBrush secondaryBrush = new SolidBrush(GlassTheme.Emphasis(secondary)))
-        using (StringFormat format = new StringFormat())
+        using (Bitmap bitmap = AppMarkPainter.Render(32, true, primary, secondary))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.Transparent);
-            using (Pen ring = new Pen(Color.FromArgb(96, GlassTheme.Cyan), 1.75f))
-            using (Pen mint = new Pen(Color.FromArgb(64, GlassTheme.Mint), 1.15f))
-            {
-                g.DrawEllipse(ring, 1.25f, 1.25f, 29.5f, 29.5f);
-                g.DrawEllipse(mint, 2.4f, 2.4f, 27.2f, 27.2f);
-            }
-            using (SolidBrush plate = new SolidBrush(Color.FromArgb(230, 248, 250, 252)))
-            {
-                g.FillEllipse(plate, 3f, 3f, 26f, 26f);
-            }
-            using (Pen highlight = new Pen(Color.FromArgb(170, 255, 255, 255), 1.6f))
-            {
-                g.DrawArc(highlight, 7f, 5.5f, 13f, 11f, 205f, 95f);
-            }
-            format.Alignment = StringAlignment.Center;
-            format.LineAlignment = StringAlignment.Center;
-            g.DrawString(QuotaFormatter.ShortNumber(primary), font, primaryBrush, new RectangleF(1f, 2f, 30f, 14f), format);
-            g.DrawString(QuotaFormatter.ShortNumber(secondary), font, secondaryBrush, new RectangleF(1f, 16f, 30f, 14f), format);
             IntPtr handle = bitmap.GetHicon();
             Icon created = Icon.FromHandle(handle);
             Icon clone = (Icon)created.Clone();
