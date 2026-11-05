@@ -53,6 +53,8 @@ Windows 状态栏按套餐显示两行剩余：现行套餐显示 `本周 76%`�
    Windows：`%APPDATA%\Cursor\User\globalStorage\state.vscdb`  
    读取 `cursorAuth/accessToken`，必要时同时读取本地套餐名 `cursorAuth/stripeMembershipType`。
 
+macOS 1.5.2 同时兼容旧版明文 JWT 和新版 `cursor-safe-storage:v1:` 加密登录态。遇到加密登录态时，通过 macOS 标准钥匙串权限读取 `Cursor Safe Storage`（账号 `Cursor Key`），在内存中解密后查询额度；不修改 Cursor 数据库、钥匙串权限或保存解密后的令牌。首次读取可能弹出系统授权提示。未授权、缺少密钥、解密失败或未知加密版本时会显示具体错误，密文不会被当作访问令牌发送。
+
 只要 Cursor 应用已登录，一般无需再配置。会话过期时，重新在 Cursor 里登录即可。
 
 ### 用量接口

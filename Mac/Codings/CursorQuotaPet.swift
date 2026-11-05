@@ -1,6 +1,8 @@
 import AppKit
 import Combine
+import CommonCrypto
 import Foundation
+import Security
 import SQLite3
 import SwiftUI
 
@@ -590,22 +592,143 @@ enum QuotaParser {
     }
 }
 
+enum SessionAccessError: LocalizedError, Equatable {
+    case unsupportedStorageVersion
+    case malformedEncryptedToken
+    case safeStorageMissing
+    case safeStorageDenied
+    case safeStorageUnavailable(OSStatus)
+    case decryptionFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedStorageVersion:
+            return "Cursor 登录态使用了尚不支持的加密版本，请更新额度仪表盘"
+        case .malformedEncryptedToken:
+            return "Cursor 加密登录态格式损坏，请在 Cursor 中重新登录"
+        case .safeStorageMissing:
+            return "未找到 Cursor Safe Storage 钥匙串项目，请先在 Cursor 中重新登录"
+        case .safeStorageDenied:
+            return "未获准读取 Cursor Safe Storage，请在 macOS 钥匙串授权提示中允许访问后重试"
+        case .safeStorageUnavailable(let status):
+            return "无法读取 Cursor Safe Storage（钥匙串状态 \(status)），请解锁登录钥匙串后重试"
+        case .decryptionFailed:
+            return "无法解密 Cursor 登录态，可能与当前钥匙串不匹配，请在 Cursor 中重新登录"
+        }
+    }
+}
+
+enum CursorSessionCodec {
+    // Electron safeStorage on macOS uses Chromium OSCrypt's v10 format.
+    // Chromium: components/os_crypt/sync/os_crypt_mac.mm and crypto/symmetric_key.cc.
+    static func decode(_ raw: String, password: () throws -> Data) throws -> String {
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard token.hasPrefix("cursor-safe-storage") else { return token }
+        let prefix = "cursor-safe-storage:v1:"
+        guard token.hasPrefix(prefix) else { throw SessionAccessError.unsupportedStorageVersion }
+        guard let encrypted = Data(base64Encoded: String(token.dropFirst(prefix.count))),
+              encrypted.count >= 3 else { throw SessionAccessError.malformedEncryptedToken }
+        guard encrypted.prefix(3) == Data("v10".utf8) else {
+            throw SessionAccessError.unsupportedStorageVersion
+        }
+        let ciphertext = Data(encrypted.dropFirst(3))
+        guard !ciphertext.isEmpty, ciphertext.count % kCCBlockSizeAES128 == 0 else {
+            throw SessionAccessError.malformedEncryptedToken
+        }
+
+        var secret = try password()
+        var key = Data(count: kCCKeySizeAES128)
+        defer {
+            secret.resetBytes(in: 0..<secret.count)
+            key.resetBytes(in: 0..<key.count)
+        }
+        guard !secret.isEmpty else { throw SessionAccessError.decryptionFailed }
+        let salt = Array("saltysalt".utf8)
+        let keyCount = key.count
+        let derived = secret.withUnsafeBytes { passwordBytes in
+            key.withUnsafeMutableBytes { keyBytes in
+                CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2),
+                    passwordBytes.baseAddress!.assumingMemoryBound(to: CChar.self), secret.count,
+                    salt, salt.count, CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1), 1003,
+                    keyBytes.baseAddress!.assumingMemoryBound(to: UInt8.self), keyCount)
+            }
+        }
+        guard derived == kCCSuccess else { throw SessionAccessError.decryptionFailed }
+        let iv = [UInt8](repeating: 0x20, count: kCCBlockSizeAES128)
+        var plaintext = Data(count: ciphertext.count + kCCBlockSizeAES128)
+        defer { plaintext.resetBytes(in: 0..<plaintext.count) }
+        let outputCount = plaintext.count
+        var written = 0
+        let status = key.withUnsafeBytes { keyBytes in
+            ciphertext.withUnsafeBytes { cipherBytes in
+                plaintext.withUnsafeMutableBytes { outputBytes in
+                    CCCrypt(CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding), keyBytes.baseAddress, keyCount,
+                            iv, cipherBytes.baseAddress, ciphertext.count,
+                            outputBytes.baseAddress, outputCount, &written)
+                }
+            }
+        }
+        guard status == kCCSuccess,
+              let decoded = String(data: plaintext.prefix(written), encoding: .utf8),
+              isJWT(decoded) else { throw SessionAccessError.decryptionFailed }
+        return decoded
+    }
+
+    private static func isJWT(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty }) else { return false }
+        // CBC has no authentication tag. Reject non-token plaintext even if padding succeeds.
+        return parts.allSatisfy { $0.utf8.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
+        } }
+    }
+}
+
 enum SessionStore {
-    static func load() -> (token: String, source: String, localPlan: String?)? {
+    static func load() throws -> (token: String, source: String, localPlan: String?)? {
         let localPlan = sqliteValue(key: "cursorAuth/stripeMembershipType")
         if let raw = ProcessInfo.processInfo.environment["CURSOR_SESSION_TOKEN"], let token = normalize(raw) {
-            return (token, "env", localPlan)
+            return (try decoded(token), "env", localPlan)
         }
         if let raw = readFile(configURL()), let token = normalize(raw) {
-            return (token, "config", localPlan)
+            return (try decoded(token), "config", localPlan)
         }
         if let raw = keychainToken(), let token = normalize(raw) {
-            return (token, "keychain", localPlan)
+            return (try decoded(token), "keychain", localPlan)
         }
         if let raw = sqliteValue(key: "cursorAuth/accessToken"), let token = normalize(raw) {
-            return (token, "cursor-app", localPlan)
+            return (try decoded(token), "cursor-app", localPlan)
         }
         return nil
+    }
+
+    private static func decoded(_ token: String) throws -> String {
+        try CursorSessionCodec.decode(token, password: safeStoragePassword)
+    }
+
+    private static func safeStoragePassword() throws -> Data {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Cursor Safe Storage",
+            kSecAttrAccount as String: "Cursor Key",
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true
+        ]
+        var result: CFTypeRef?
+        // Standard macOS access controls may ask the user to authorize this application.
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data, !data.isEmpty else {
+                throw SessionAccessError.decryptionFailed
+            }
+            return data
+        case errSecItemNotFound: throw SessionAccessError.safeStorageMissing
+        case errSecAuthFailed, errSecUserCanceled, errSecInteractionNotAllowed:
+            throw SessionAccessError.safeStorageDenied
+        default: throw SessionAccessError.safeStorageUnavailable(status)
+        }
     }
 
     static func cookieValue(from token: String) -> String {
@@ -884,8 +1007,15 @@ final class CursorUsageClient {
         inflight = true
         defer { inflight = false }
 
-        guard let session = SessionStore.load() else {
-            emitError("未找到 Cursor 登录态，请先在 Cursor 中登录")
+        let session: (token: String, source: String, localPlan: String?)
+        do {
+            guard let loaded = try SessionStore.load() else {
+                emitError("未找到 Cursor 登录态，请先在 Cursor 中登录")
+                return
+            }
+            session = loaded
+        } catch {
+            emitError(error.localizedDescription)
             return
         }
 

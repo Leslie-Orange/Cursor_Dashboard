@@ -15,6 +15,7 @@ struct AppearanceTests {
         testQuotaParserAmountSourcesAndPeriods()
         testWeeklyQuotaPrecedenceAndUnknown()
         testQuotaSnapshotEncoding()
+        testEncryptedSessionCodec()
         testStatusViewHitTestingAndCallbacks()
         testPreviewScenariosAndCacheIsolation()
         testHostingSizes()
@@ -22,6 +23,55 @@ struct AppearanceTests {
         renderStatusViewPreviewsIfRequested()
 
         print("Appearance tests passed: \(assertions) assertions")
+    }
+
+    private static func testEncryptedSessionCodec() {
+        // Synthetic fixture, independently generated with Python hashlib.pbkdf2_hmac
+        // (SHA1, saltysalt, 1003, 16 bytes) and openssl enc -aes-128-cbc (16-space IV).
+        let token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlLXVzZXIifQ.fixture-signature"
+        let envelope = "cursor-safe-storage:v1:djEwehPp7VV6EBr9ZtcTDzuzD9neZiV0Z0nCoKk2bb6yOJU1T6xPtA9CZaBgo+CfByCGDWdbKJ+5szY+g4DgyP1LFQ3L91wdNYSyb+epYZi8XAs="
+        let password = Data("fixture-safe-storage-password".utf8)
+        expect((try? CursorSessionCodec.decode(envelope, password: { password })) == token,
+               "v1/v10 safeStorage decrypts the independent synthetic JWT fixture")
+        var passwordReads = 0
+        for legacy in [token, "fixture-user::\(token)", "fixture-user%3A%3A\(token)"] {
+            let decoded = try? CursorSessionCodec.decode(" \(legacy)\n", password: {
+                passwordReads += 1
+                return password
+            })
+            expect(decoded == legacy, "legacy JWT and explicit cookie formats remain compatible")
+        }
+        expect(passwordReads == 0, "legacy sessions never read the safeStorage Keychain password")
+        expect(SessionStore.bearerToken(from: "fixture-user::\(token)") == token,
+               "explicit cookies still produce a JWT bearer")
+        expect(SessionStore.cookieValue(from: token) == "fixture-user::\(token)",
+               "decrypted JWT preserves the existing cookie subject behavior")
+
+        func expectError(_ value: String, _ expected: SessionAccessError,
+                         password secret: () throws -> Data = { password }) {
+            do {
+                _ = try CursorSessionCodec.decode(value, password: secret)
+                expect(false, "invalid encrypted session must throw")
+            } catch {
+                expect((error as? SessionAccessError) == expected,
+                       "encrypted session errors are explicit and never return ciphertext")
+            }
+        }
+        expectError(envelope, .decryptionFailed, password: { Data("wrong-password".utf8) })
+        expectError(envelope, .decryptionFailed, password: { Data() })
+        expectError(envelope, .safeStorageDenied, password: { throw SessionAccessError.safeStorageDenied })
+        expectError("cursor-safe-storage:v2:abc", .unsupportedStorageVersion)
+        expectError("cursor-safe-storage:v1:!!!", .malformedEncryptedToken)
+        expectError("cursor-safe-storage:v1:", .malformedEncryptedToken)
+        expectError("cursor-safe-storage:v1:" + Data("v11".utf8).base64EncodedString(), .unsupportedStorageVersion)
+        expectError("cursor-safe-storage:v1:" + Data("v10short".utf8).base64EncodedString(), .malformedEncryptedToken)
+        expectError("cursor-safe-storage:v1:" + Data("v10".utf8).base64EncodedString(), .malformedEncryptedToken)
+        var malformedPasswordReads = 0
+        expectError("cursor-safe-storage:v1:bad", .malformedEncryptedToken, password: {
+            malformedPasswordReads += 1
+            return password
+        })
+        expect(malformedPasswordReads == 0, "malformed encrypted data is rejected before requesting Keychain access")
     }
 
     @MainActor
